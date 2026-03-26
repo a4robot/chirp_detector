@@ -34,8 +34,12 @@ class MechanicalChaosEngine:
             shift = float(vibration_shift[i])
             # Correct the row with sub-pixel shift
             new_x = orig_x - shift
-            distorted_image[i] = np.interp(new_x, orig_x, sampled_image[i], 
-                                          left=0, right=0).astype(np.uint8)
+            row = sampled_image[i]
+            distorted_image[i] = np.interp(
+                new_x, orig_x, row,
+                left=float(row[0]),    # replicate left edge pixel
+                right=float(row[-1])   # replicate right edge pixel
+            ).astype(np.uint8)
 
             # Record standard truth for validation
             answer_key.append({
