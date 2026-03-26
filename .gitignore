@@ -1,0 +1,13 @@
+# Data and artifacts
+data/
+output/
+__pycache__/
+*.npy
+*.png
+*.json
+*.txt
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
