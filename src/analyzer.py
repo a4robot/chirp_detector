@@ -143,43 +143,34 @@ class DSPReconstructor:
 
     def restore_vertical_phase_mapping(self, distorted_image: np.ndarray) -> np.ndarray:
         """
-        Build a source-row mapping for every distorted row using THREE chirp
-        strips fused by confidence weighting.
+        Build a source-row mapping for every distorted row using TWO complementary
+        chirp strips fused by confidence weighting.
 
-        Why three strips?
-        -----------------
-        • Col 2 (Low,   5→25 c/img) : always resolvable; coarse resolution.
-        • Col 3 (Mid,  15→35 c/img) : good resolution; aliases under 2×+ skips.
-        • Col 4 (High, 25→45 c/img) : finest resolution; first to alias.
+        Strip layout
+        ------------
+        • Col 2 (Fwd,  5→25 cy) : frequency increases top→bottom.
+        • Col 3 (Rev, 25→ 5 cy) : frequency decreases top→bottom (mirror of col2).
 
-        Confidence Weighting
-        --------------------
-        Each strip's effective weight = amplitude_confidence × freq_preference²
+        Together: inst_freq_fwd(t) + inst_freq_rev(t) = 30 cy everywhere (constant).
+                  inst_freq_fwd(t) - inst_freq_rev(t) = 2·k·t  (linearly encodes t).
 
-          1. Amplitude confidence  : local RMS of the AC-coupled signal.
-             Aliasing/blur collapses AC amplitude → confidence → 0.
-
-          2. Frequency preference  : weight ∝ (f1 / f1_max)²
-             Physically: higher frequency ↔ finer phase resolution.
-             Col4 gets 1.00×, Col3 gets 0.60×, Col2 gets 0.31×.
-             When Col4 aliases its amplitude confidence drops to ~0 first,
-             so the fusion automatically falls back to Col3, then Col2.
-
-          3. Frequency-plausibility gate  : out-of-band f_inst rows → weight 0.
+        Both strips carry the same spatial information content so their
+        confidence weights are equal (no frequency-preference boost needed).
+        Edge-counting on the reversed strip is still exact: the only difference
+        is that k is negative, so the quadratic inversion produces t values
+        that count from the *bottom* — _estimate_source_y_single_strip handles
+        this correctly because it matches observed edges to the ideal profile
+        which was also generated with f0=25, f1=5.
 
         Returns
         -------
-        np.ndarray  shape (N_distorted,)  — source row index ∈ [0, 999]
+        np.ndarray  shape (N_distorted,)  — source row index ∈ [0, height-1]
         """
-        max_f1 = max(self.cfg.col2_f1, self.cfg.col3_f1, self.cfg.col4_f1)
-
         strips = [
             (self.cfg.col2_start, self.cfg.col2_end,
              self.cfg.col2_f0,    self.cfg.col2_f1),
             (self.cfg.col3_start, self.cfg.col3_end,
              self.cfg.col3_f0,    self.cfg.col3_f1),
-            (self.cfg.col4_start, self.cfg.col4_end,
-             self.cfg.col4_f0,    self.cfg.col4_f1),
         ]
 
         all_estimates  = []
@@ -188,25 +179,22 @@ class DSPReconstructor:
         for (cs, ce, f0, f1) in strips:
             est, conf = self._estimate_source_y_single_strip(
                 distorted_image, cs, ce, f0, f1)
-
-            # Frequency-preference scaling:  Col4 → 1.00×, Col3 → 0.60×, Col2 → 0.31×
-            freq_pref = (f1 / max_f1) ** 2
-
             all_estimates.append(est)
-            all_confidence.append(conf * freq_pref)
+            all_confidence.append(conf)
 
-        estimates  = np.array(all_estimates)    # (3, N)
-        confidence = np.array(all_confidence)   # (3, N)
+        estimates  = np.array(all_estimates)    # (2, N)
+        confidence = np.array(all_confidence)   # (2, N)
 
         total_weight = confidence.sum(axis=0)
         denominator  = np.where(total_weight > 1e-6, total_weight, 1.0)
         fused        = (estimates * confidence).sum(axis=0) / denominator
 
-        # Fallback to linear ramp where all weights collapsed
+        # Fallback to linear ramp where both strips lose confidence
         fallback = np.linspace(0.0, self.cfg.height - 1, len(fused))
         fused    = np.where(total_weight > 1e-6, fused, fallback)
 
         return self._enforce_monotonicity(fused)
+
 
     # ─────────────────────────────────────────────────────────────────────────
     # Step 3 – Recipe Generation

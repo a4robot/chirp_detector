@@ -3,42 +3,44 @@ from dataclasses import dataclass
 
 @dataclass
 class ScanConfig:
-    """Central configuration for the 4-column, 1000x400 ground-truth image."""
+    """
+    Central configuration for the 3-column, 1000×300 ground-truth image.
+
+    Layout
+    ──────
+    Col 1 (  0– 99): X-Axis Reference  — white bg + 10-px black centre line
+    Col 2 (100–199): Low Chirp Fwd     —  5 → 25 cycles  (top-to-bottom)
+    Col 3 (200–299): Low Chirp Rev     — 25 →  5 cycles  (bottom-to-top mirror)
+    """
 
     # ── Image Dimensions ──────────────────────────────────────────────────────
     height: int = 1000
-    width:  int = 400      # 4 × 100-px columns
+    width:  int = 300      # 3 × 100-px columns
 
     # ── Column 1: X-Axis Reference (Vibration Tracker) ───────────────────────
-    # Solid white (255) background with a 10-px-wide black (0) line at centre.
     col1_start: int = 0
     col1_end:   int = 100
-    # Black line: columns 45-54 (centre of a 100-px band → pixel 50 is centre)
+    # 10-px-wide black line centred at pixel 50 (cols 45–54)
     x_line_start: int = 45
-    x_line_end:   int = 55   # centre = 50.0
-    x_tracker_expected_center: float = 49.5   # centre of cols 45-54: (45+54)/2
+    x_line_end:   int = 55
+    x_tracker_expected_center: float = 49.5   # (45 + 54) / 2
 
-    # ── Columns 2-4: Spatial Chirp Strips ────────────────────────────────────
-    # All three strips are grayscale (full-amplitude cosine, NOT binarised)
-    # so that the intensity alone encodes position — perfect for a reference.
-    #
-    # Column 2 (Low):  5  → 25 cycles/image
+    # ── Column 2: Low Chirp Forward  (5 → 25 cycles, top-to-bottom) ──────────
     col2_start: int   = 100
     col2_end:   int   = 200
     col2_f0:    float = 5.0
     col2_f1:    float = 25.0
 
-    # Column 3 (Mid): 15 → 35 cycles/image
+    # ── Column 3: Low Chirp Reversed (25 → 5 cycles, bottom-to-top) ──────────
+    # Same frequency range as col2 but mirrored: f0=25 at top, f1=5 at bottom.
+    # The negative chirp rate (k = f1 − f0 = −20) is handled naturally by the
+    # phase formula.  Together with col2 they form a complementary pair whose
+    # instantaneous-frequency sum is constant (30 cy/img everywhere) and whose
+    # difference linearly encodes row position.
     col3_start: int   = 200
     col3_end:   int   = 300
-    col3_f0:    float = 15.0
-    col3_f1:    float = 35.0
-
-    # Column 4 (High): 25 → 45 cycles/image
-    col4_start: int   = 300
-    col4_end:   int   = 400
-    col4_f0:    float = 25.0
-    col4_f1:    float = 45.0
+    col3_f0:    float = 25.0   # ← high frequency at top
+    col3_f1:    float = 5.0    # ← low  frequency at bottom
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Path Management
