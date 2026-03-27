@@ -350,78 +350,65 @@ class DSPReconstructor:
                                         f0: float,
                                         f1: float) -> tuple[np.ndarray, np.ndarray]:
         """
-        Hilbert-phase inversion for ONE linear-frequency chirp strip.
-
-        Returns (source_y_estimate, confidence) both shape (N_distorted,).
-
-        Phase inversion
-        ---------------
-        Chirp law:   phase(t) = 2π·(f0·t + ½·k·t²),   k = f1 − f0
-        Inversion:   t = [−f0 + √(f0² + 2k·φ/(2π))] / k
-
-        Confidence
-        ----------
-        Local RMS of the AC-coupled chirp signal in a sliding window ≈ 2 ideal
-        periods.  Aliasing/blur collapses AC amplitude → confidence → 0.
-
-        Edge-effect mitigation  (Hilbert boundary bias)
-        ------------------------------------------------
-        Reflect-pad the signal by ≥ 1 period of f0 before applying the Hilbert
-        transform.  This keeps boundary phase artifacts outside the active rows.
-
-        Phase DC anchoring  (strip-dependent initial angle)
-        ----------------------------------------------------
-        The Hilbert initial angle depends on where the chirp's cosine cycle
-        happens to start.  Subtracting inst_phase[0] would force source_y[0]=0,
-        which is wrong when the distorted image doesn't start from original row 0.
-
-        Fix: fit a linear trend through the central 50 % of the unwrapped phase
-        (most reliable region, away from edges) and extrapolate it back to row 0.
-        Subtracting that extrapolated value removes the DC phase offset while
-        preserving absolute phase information.
+        Binary edge-counting phase inversion for ONE linear-frequency chirp strip.
+        It precisely matches observed edge transitions 1-to-1 against generated
+        ideal edge transitions, naturally reversing non-linear mechanical slip.
         """
         H      = float(self.cfg.height)
         k      = f1 - f0
         n_rows = distorted_image.shape[0]
 
-        # ── 1. Extract mean column profile ────────────────────────────────────
-        raw = distorted_image[:, col_start:col_end].mean(axis=1).astype(float)
+        # ── 1. Create the IDEAL column profile computationally ────────────────
+        t_ideal = np.linspace(0.0, 1.0, int(H), endpoint=False)
+        phase_ideal = 2.0 * np.pi * (f0 * t_ideal + 0.5 * k * t_ideal ** 2)
+        ideal_binary = (np.sin(phase_ideal) >= 0).astype(int)
 
-        # ── 2. Confidence from local AC amplitude ─────────────────────────────
+        # ── 2. Extract distorted binary column profile ────────────────────────
+        raw = distorted_image[:, col_start:col_end].mean(axis=1)
+        dist_binary = (raw >= 128).astype(int)
+
+        # ── 3. Detect edge transition indices (rows) ──────────────────────────
+        ideal_diff = np.diff(ideal_binary)
+        dist_diff  = np.diff(dist_binary)
+        
+        ideal_edges = np.where(ideal_diff != 0)[0].astype(float)
+        dist_edges  = np.where(dist_diff != 0)[0].astype(float)
+
+        if len(dist_edges) < 2 or len(ideal_edges) < 2:
+            return np.linspace(0, H - 1, n_rows), np.zeros(n_rows)
+
+        # ── 4. Align edges 1-to-1 ─────────────────────────────────────────────
+        ideal_first_pol = ideal_diff[int(ideal_edges[0])]
+        dist_first_pol  = dist_diff[int(dist_edges[0])]
+        
+        ideal_start = 0
+        if ideal_first_pol != dist_first_pol:
+            ideal_start = 1
+            
+        min_len = min(len(ideal_edges) - ideal_start, len(dist_edges))
+        
+        matched_ideal = ideal_edges[ideal_start: ideal_start + min_len]
+        matched_dist  = dist_edges[:min_len]
+
+        # ── 5. Interpolate to fill all rows ───────────────────────────────────
+        all_rows   = np.arange(n_rows, dtype=float)
+        # We linearly extrapolate via Pchip to map the edges exactly
+        pchip = PchipInterpolator(matched_dist, matched_ideal, extrapolate=True)
+        source_y = np.clip(pchip(all_rows), 0, H - 1)
+
+        # ── 6. Confidence metric ──────────────────────────────────────────────
+        # Confidence drops if aliasing blurs the binary wave into flat gray
         f_mean       = (f0 + f1) / 2.0
-        win          = max(5, int(H / f_mean * 2))      # ≈ 2 ideal periods
-        raw_dc       = uniform_filter1d(raw, size=win, mode='nearest')
-        raw_ac       = raw - raw_dc
+        win          = max(5, int(H / f_mean * 2))
+        raw_float    = raw.astype(float)
+        raw_dc       = uniform_filter1d(raw_float, size=win, mode='nearest')
+        raw_ac       = raw_float - raw_dc
         local_rms    = np.sqrt(uniform_filter1d(raw_ac ** 2, size=win, mode='nearest'))
-        expected_rms = 127.5 / np.sqrt(2)               # full-swing cosine ≈ 90.1
+        expected_rms = 127.5
         confidence   = np.clip(local_rms / expected_rms, 0.0, 1.0)
-
-        # ── 3. Reflect-pad + next_fast_len to suppress boundary artifacts ────────
-        # Reflect-pad by ≥1 period of f0 for reliable edge-phase behaviour.
-        # Use next_fast_len to guarantee a highly composite N for the FFT,
-        # avoiding extreme O(N²) slowdowns if length has large prime factors.
-        pad        = max(50, int(H / f0))               # ≥1 period of lowest freq
-        target_len = next_fast_len(n_rows + 2 * pad)
-        pad_right  = target_len - n_rows - pad
-        padded     = np.pad(raw_ac, (pad, pad_right), mode='reflect')
-        analytic   = hilbert(padded)
-        inst_phase = np.unwrap(np.angle(analytic))[pad: pad + n_rows]
-
-        # ── 4. Phase DC-offset correction ─────────────────────────────────────
-        # Subtract the phase offset at distorted-row 0: the chirp phase at the
-        # very first distorted row is NOT necessarily 0 (it depends on where
-        # in the chirp the distortion started).  The inversion formula is
-        # derived assuming phase starts at 0, so we anchor accordingly.
-        inst_phase = inst_phase - inst_phase[0]
-
-        # ── 5. Quadratic inversion: phase → t → source row ───────────────────
-        rhs      = inst_phase / (2.0 * np.pi)
-        disc     = np.maximum(f0 ** 2 + 2.0 * k * rhs, 0.0)
-        t        = np.clip((-f0 + np.sqrt(disc)) / k, 0.0, 1.0)
-        source_y = t * (H - 1)
-
-        # ── 6. Frequency-plausibility penalty ─────────────────────────────────
-        f_inst     = f0 + k * t
+        
+        # Penalize implausibly fast frequency (out of band)
+        f_inst     = f0 + k * (source_y / (H - 1))
         margin     = 2.0
         in_band    = (f_inst >= f0 - margin) & (f_inst <= f1 + margin)
         confidence = confidence * in_band.astype(float)
