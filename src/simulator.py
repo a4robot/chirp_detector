@@ -73,6 +73,7 @@ class MechanicalChaosEngine:
         indices = np.arange(length)
         oscillation = 3 * np.sin(2 * np.pi * indices / 100)
         noise = np.random.normal(0, 0.5, length)
+        # noise = np.zeros(length)
         return (oscillation + noise).astype(float)
 
 def main():
