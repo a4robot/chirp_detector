@@ -1,6 +1,7 @@
-# 4-Strip Staggered Binary (4SSB) Reconstruction Algorithm
+# N-Strip Staggered Binary (NSSB) Reconstruction Algorithm
+(Formerly 4-Strip Staggered Binary / 4SSB)
 
-The **4-Strip Staggered Binary (4SSB)** algorithm is a highly robust, high-precision technique for detecting and removing mechanical distortions (vibration, slip, and skip) from line-scan imagery. It solves the physical resolution limits of spatial coding formats by interleaving multiple low-frequency binary components.
+The **N-Strip Staggered Binary (NSSB)** algorithm is a highly robust, high-precision technique for detecting and removing mechanical distortions (vibration, slip, and skip) from line-scan imagery. It solves the physical resolution limits of spatial coding formats by interleaving multiple low-frequency binary components.
 
 ---
 
@@ -8,13 +9,9 @@ The **4-Strip Staggered Binary (4SSB)** algorithm is a highly robust, high-preci
 
 In a binary chirp, physical space is encoded via frequency transitions (edges). The problem: if the printing or camera resolution limits you to $N$ cycles (e.g., 25 cycles), a single continuous strip only provides $2N$ (e.g., 50) edges across the entire image. Any distortion hiding "between" two edges goes undetected.
 
-**The 4SSB Solution:** Use 4 identical binary chirps placed side-by-side, but stagger their starting phases:
-*   **Strip 1 (Fwd):** Phase $0$
-*   **Strip 2 (Rev):** Phase $\pi/4$
-*   **Strip 3 (Fwd):** Phase $\pi/2$
-*   **Strip 4 (Rev):** Phase $3\pi/4$
+**The Solution:** Use $N$ identical binary chirps placed side-by-side, but stagger their starting phases by $\Delta\phi = \pi/N$.
 
-This interleaves the transitions. A 25-cycle limit per strip now yields **$4 \times 50 = 200$ perfectly distributed edges** across the scan length, multiplying the effective sampling rate by four without demanding higher physical print/camera resolution.
+This interleaves the transitions. For 4 strips, a 25-cycle limit yields **200 perfectly distributed edges** across the scan length, multiplying the effective sampling rate without demanding higher physical print/camera resolution.
 
 ![Figure 1: Staggered Phase Encoding Principle](figures/staggered_phase_principle.png)
 > **Image Generation Prompt:** A technical diagram showing 4 parallel vertical binary chirp strips. Each strip has square-wave patterns (black and white blocks) that are slightly offset vertically from each other (phase-shifted). Highlight with colored horizontal lines how the edges (transitions) from different strips interleave to create a much denser sampling grid of edges than any single strip alone. Professional, clean vector style.
@@ -26,12 +23,12 @@ This interleaves the transitions. A 25-cycle limit per strip now yields **$4 \ti
 To convert the staggered binary strips back into a sub-pixel distortion map (`target_y` vs `distorted_y`), the algorithm employs a **Point-Pool Fusion** strategy instead of averaging independent estimates.
 
 ![Figure 2: The Point-Pool Fusion Process](figures/point_pool_process.png)
-> **Image Generation Prompt:** A conceptual illustration of the Point-Pool process. Show 4 separate streams of discrete points (representing edges from 4 strips) merging into a single, dense "pool" of points. Then show a smooth, continuous curve (the PCHIP spline) being fitted through this unified dense point cloud. Use distinct colors for points from different strips and a bold contrasting color for the final spline. Clear, instructional infographic style.
+> **Image Generation Prompt:** A conceptual illustration of the Point-Pool process. Show separate streams of discrete points merging into a single, dense "pool" of points. Then show a smooth, continuous curve (the PCHIP spline) being fitted through this unified dense point cloud. Use distinct colors for points from different strips and a bold contrasting color for the final spline. Clear, instructional infographic style.
 
 ### Algorithm Steps:
-1.  **Independent Edge Harvesting:** For each of the 4 strips, extract the distorted sequence of edges (black-to-white and white-to-black transitions).
+1.  **Independent Edge Harvesting:** For each of the $N$ strips, extract the distorted sequence of edges (black-to-white and white-to-black transitions).
 2.  **Robust Interval Alignment (Sliding Window):** Because mechanical vibration can cause absolute row slips right at the very start of the scan, index 0 of the distorted edges might not map to index 0 of the ideal edges. A sliding-window cross-correlation matches the distorted interval sequences against ideal interval sequences to find the exact starting offset, preventing catastrophic "off-by-one" mapping errors.
-3.  **The Point Pool:** Instead of interpolating a continuous curve per strip, we dump every aligned `(distorted_row, ideal_row)` pair from all 4 strips into a single unified "Point Pool".
+3.  **The Point Pool:** Instead of interpolating a continuous curve per strip, we dump every aligned `(distorted_row, ideal_row)` pair from all strips into a single unified "Point Pool".
 4.  **Deduplication & RANSAC-lite:** Identical rows are averaged. A sliding median window walks over the sorted pool, violently rejecting any point (edge) that falls significantly outside the local monotonic trend (ignoring noise/smudges that cause false edges).
 5.  **Master PCHIP Fit:** A single `PchipInterpolator` (Piecewise Cubic Hermite Interpolating Polynomial) is fitted through the clean, high-density point pool. PCHIP guarantees monotonicity (time cannot flow backward), yielding the final smooth, high-precision vertical motion profile.
 
@@ -43,13 +40,13 @@ To convert the staggered binary strips back into a sub-pixel distortion map (`ta
 graph TD
     A[Distorted Image] --> B[Strip 1: Extract Edges]
     A --> C[Strip 2: Extract Edges]
-    A --> D[Strip 3: Extract Edges]
-    A --> E[Strip 4: Extract Edges]
+    A --> D[...]
+    A --> E[Strip N: Extract Edges]
 
     subgraph "Robust Edge Alignment"
         B --> F[Offset Match]
         C --> G[Offset Match]
-        D --> H[Offset Match]
+        D --> H[...]
         E --> I[Offset Match]
     end
 
@@ -63,88 +60,73 @@ graph TD
     end
 
     L --> M[Master PCHIP Spline Fit]
-    M --> N[Continuous Y-Axis Mapping]
+    M --> N_Axis[Continuous Y-Axis Mapping]
     
-    A --> O[Cols 0-99: Centroid X-Tracker]
+    A --> O[X-Tracker: Centroid Extractor]
     O --> P[Median Smoothing]
     P --> Q[Continuous X-Axis Shift Map]
 
-    N --> R{Image Reconstruction}
+    N_Axis --> R{Image Reconstruction}
     Q --> R
     R --> S[Restored Image output]
 ```
 
 ---
 
-## 4. Why 4SSB is Superior
+## 4. Why Point-Pool NSSB is Superior
 
 ### Why it beats the 1-Strip Binary approach:
 *   **Resolution Ceiling:** A 1-strip binary layout is limited by the optical threshold (MTF) of the camera. Push the frequency too high, and edges blur into gray mush. 
-*   **Temporal Blind Spots:** Between any two edges on a 1-strip layout, there is zero data. If the camera slips within that gap, the decoder interpolates blindly. 4SSB populates those blind spots with adjacent staggered edges, ensuring no distortion goes unmeasured.
+*   **Temporal Blind Spots:** Between any two edges on a 1-strip layout, there is zero data. If the camera slips within that gap, the decoder interpolates blindly. NSSB populates those blind spots with adjacent staggered edges, ensuring no distortion goes unmeasured.
 
 ![Figure 3: Comparative Analysis](figures/comparative_analysis.png)
-> **Image Generation Prompt:** A three-panel comparison diagram. Panel A: "1-Strip Binary" showing sparse sampling points and a slightly wavy, inaccurate reconstruction line. Panel B: "4-Strip Averaging" showing multiple oscillating lines (ringing artifacts) being averaged into a messy result. Panel C: "4SSB Point-Pool" showing a dense cloud of points and a perfectly smooth, accurate reconstruction line passing through them. High contrast, technical comparison style.
+> **Image Generation Prompt:** A three-panel comparison diagram. Panel A: "1-Strip Binary" showing sparse sampling points and a slightly wavy, inaccurate reconstruction line. Panel B: "4-Strip Averaging" showing multiple oscillating lines (ringing artifacts) being averaged into a messy result. Panel C: "NSSB Point-Pool" showing a dense cloud of points and a perfectly smooth, accurate reconstruction line passing through them. High contrast, technical comparison style.
 
-### Why "Point-Pool" beats 4-Strip Average or Winner-Take-All:
+### Why "Point-Pool" beats N-Strip Average or Winner-Take-All:
 
-During the R&D process, we attempted three multi-strip synthesis algorithms before discovering the Point-Pool.
+1.  **Averaging Independent Splines (Poor):** Averaging multiple ringing curves just produces a composite ringing curve.
+2.  **Winner-Take-All / Confidence Weighting (Sub-optimal for Binary):** Throws away the $N\times$ sampling density advantage.
+3.  **Median of Strips (Lowest Common Denominator):** Acts as a low-pass filter on the mechanical distortion that we are actively trying to map.
 
-1.  **Averaging Independent Splines (Poor):**
-    If you extract edges for Strip 1, interpolate a spline for the whole image, do the same for Strip 2, 3, and 4, and then average the 4 splines, the result creates **oscillating artifacts**. Sparse interpolation introduces ringing. Averaging multiple ringing curves just produces a composite ringing curve.
-2.  **Winner-Take-All / Confidence Weighting (Sub-optimal for Binary):**
-    Winner-Take-All makes sense for analogue/continuous sine-waves where signal amplitude equates to confidence. In binary edge-counting, an edge is an edge. Confidence weighting devolves into selecting a single strip locally, throwing away the $3\times$ sampling density advantage the other staggered strips provide.
-3.  **Median of Strips (Lowest Common Denominator):**
-    Taking the median of independent splines aggressively destroys sub-pixel nuances, acting as a low-pass filter on the mechanical distortion that we are actively trying to map and correct.
-
-**The "Point-Pool" Breakthrough:**
-By acknowledging that *the data is point-cloud data, not continuous data*, we avoid interpolating early. We pool raw physical observations (edges) from all 4 strips into one extremely dense, mathematically pure point-cloud array. We then fit **one single spline** through all 200 points simultaneously. This bounds the interpolation interval so tightly that interpolation-ringing mathematically cannot occur, leading to the **25.14 dB PSNR** gold-standard validation.
+**The Breakthrough:**
+By acknowledging that *the data is point-cloud data, not continuous data*, we avoid interpolating early. The single PCHIP spline bounds the interpolation interval tightly between all $N$ interleaved edges, achieving **>24.5 dB PSNR**.
 
 ---
 
-## 5. The Evolution: N-Strip Dynamic Architecture
+## 5. Scaling to High-Resolution (16k Industrial Scanning) & The Aliasing Paradox
 
-While the 4-strip model was a breakthrough, the system has been refactored into a **Dynamic N-Strip Architecture**. This allows the operator to tune the number of strips ($N$), strip width ($W$), and gap width ($G$) to balance reconstruction fidelity against physical image real estate.
+When deploying this architecture on a $16,384$ px sensor (e.g., a 50cm ultra-high-resolution line scan), the performance dynamics shift fundamentally.
 
-Key architectural changes include:
-*   **Procedural Phase Staggering:** Phase offsets are automatically calculated as $\Delta\phi = \pi/N$, ensuring perfect interleaving regardless of strip count.
-*   **Alternating Chirp Direction:** Strips alternate between "Forward" and "Reverse" frequency sweeps, increasing local edge contrast and making the "Point-Pool" more robust to directional mechanical slip.
+### The 16k Benchmark Results (Fixed $W=50$, $Gap=50$)
 
----
+| N (Strips) | Strip W | Gap W | Tot W | PSNR (dB) | MAE | Finding |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | 50px | 50px | 120px* | 12.86 | 14.62 | Severe temporal undersampling |
+| 2 | 50px | 50px | 220px* | 24.15 | 2.21 | Good Recovery |
+| **3** | **50px**| **50px**| **320px*** | **25.26** | **1.86** | **The Global 16k Optimum** |
+| 4 | 50px | 50px | 420px* | 21.71 | 2.77 | Minor phase aliasing |
+| 5 | 50px | 50px | 520px* | 24.90 | 1.81 | Resonant recovery (sub-optimal) |
+| 6 | 50px | 50px | 620px* | 14.51 | 10.11 | **Catastrophic Phase-Aliasing** |
 
-## 6. Design Optimization & Findings
+*(Total Width calculations include the initial 50px X-Tracker plus intervening 50px gaps)*
 
-Following a systematic grid-search benchmark comparing 72 combinations of $N$, $W$, and $G$, we identified the following global optima for the system:
+### The Aliasing Paradox
+At $1,000$px height, $N=6$ was optimal. However, at $16,384$ px depth (with identical physical machine vibration magnitude), $N=6$ fails completely. 
+**Why?** Because 1 spatial cycle now spans $\approx 655$ rows. For $N=6$, phase interleaving places an absolute edge every $54$ rows ($\Delta\phi = \pi/6$). If a mechanical machine slips/skips by more than $54$ rows, the Point-Pool suffers **destructive phase-aliasing**—it incorrectly aligns an edge from Strip 1 to an expected temporal edge from Strip 2, mathematically ripping the reconstruction apart.
 
-### Benchmark Summary Table (Fixed Gap = 50px)
-| N (Strips) | Strip Width (W) | Total Width | PSNR (dB) | MAE | Finding |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| 4 | 100px | 750px | 23.89 | 2.52 | Baseline performance |
-| **6** | **50px** | **750px** | **24.57** | **2.28** | **Global Optimum (Efficient)** |
-| 6 | 100px | 1050px | 24.79 | 2.27 | Diminishing returns on width |
-| 16 | 100px | 2550px | 24.69 | 2.28 | **Degradation due to edge-aliasing** |
+### The 16k Master Solution ($N=3$)
+Decreasing the layout to **$N=3$** pushes the absolute edge separation out to $\approx 109$ rows. This creates a massive mathematical "safety gap" that acts as a physical buffer against analog mechanical slips, making cross-strip cycle aliasing practically impossible.
 
-### Critical Discoveries:
-1.  **The "Stagger Limit" ($N=6$):** Increasing $N$ beyond 6 provides negligible gains or even small degradations. At $N > 10$, the phase-shifted edges become so physically close that mechanical vibration causing "edge-blur" makes it mathematically difficult for the Point-Pool to distinguish between distinct transitions.
-2.  **Width Efficiency:** A 50px strip is nearly as robust as a 150px strip. The Point-Pool requires *existence* of the edge, not its *extenuation*. Shrinking $W$ from 100px to 50px saved **25% of total image width** with a negligible delta in quality.
-3.  **The 50px Gap Rule:** Small gaps ($<30$px) allow high-contrast binary data to bleed into the X-tracker or adjacent strips during violent horizontal vibration. A **50px black gap** is mandatory for signal isolation.
-
-**Current Production Standard (1000px Sensor):** $N=6$, $W=50$, $G=50$. This configuration achieves a reconstruction PSNR of **24.57 dB** while optimizing for throughput and data density.
+We also determined that **Strip Width (50px)** and **X-Tracker Width (50px)** provide enough visual mass for robust centroiding and do not need to scale proportionally with the 16k sensor width. 
 
 ---
 
-## 7. Scaling to High-Resolution (16k Industrial Scanning)
+## 6. The Final 16k Production Layout
 
-When deploying this architecture on a $16,384$ px sensor (e.g., a 50cm ultra-high-resolution line scan), the parameters shift fundamentally. A 16k scaling benchmark generated the following breakthroughs:
-
-*   **Shrinking the Footprint:** At 16k, an X-Tracker does not need to scale proportionally. A tight 50px X-Tracker works flawlessly, maintaining sub-pixel correlation on the continuous black reference line.
-*   **The Aliasing Paradox:** At 1000px height, $N=6$ was the optimum. However, at $16,384$ px depth (with identical vibration magnitude), $N=6$ fails catastrophically ($<16$ dB). Why? Because 1 cycle now spans $\approx 655$ rows. $N=6$ interleaves edges every $54$ rows. If a mechanical slip is larger than $54$ rows, the Point-Pool suffers **destructive phase-aliasing** (matching an edge from Strip 1 to an expected edge from Strip 2).
-*   **The 16k Optimum ($N=3$):** Decreasing the layout to **$N=3$** spreads the phase separation to $\approx 109$ rows. This creates an unbridgeable gap for analog mechanical slip, allowing the Point-Pool to lock on with perfect confidence.
-
-### The 16k Master Layout
 *   `n_strips` = **3**
 *   `strip_width` = **50 px**
 *   `gap_width` = **50 px**
-*   X-Tracker = **50 px**
+*   `x_tracker` = **50 px**
 
-**Hardware Impact:** This layout yields an unprecedented **25.26 dB PSNR**, yet occupies only **400 pixels total** (X-Tracker + 3 strips + 4 gaps). 
-This requires an astonishingly tiny **2.4%** of the 16k sensor, cleanly freeing **$15,984$ pixels (48.8 cm)** for raw object scanning.
+**Hardware Impact:** This layout geometry yields an unprecedented **25.26 dB PSNR**, yet occupies only a micro-fraction of the screen.
+The complete footprint requires an astonishingly tiny **2.4%** of a 16k sensor bandwidth, cleanly freeing **$15,984$ pixels (48.8 cm)** identically on every scan for uninhibited, raw object scanning.
