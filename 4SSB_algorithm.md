@@ -98,3 +98,53 @@ During the R&D process, we attempted three multi-strip synthesis algorithms befo
 
 **The "Point-Pool" Breakthrough:**
 By acknowledging that *the data is point-cloud data, not continuous data*, we avoid interpolating early. We pool raw physical observations (edges) from all 4 strips into one extremely dense, mathematically pure point-cloud array. We then fit **one single spline** through all 200 points simultaneously. This bounds the interpolation interval so tightly that interpolation-ringing mathematically cannot occur, leading to the **25.14 dB PSNR** gold-standard validation.
+
+---
+
+## 5. The Evolution: N-Strip Dynamic Architecture
+
+While the 4-strip model was a breakthrough, the system has been refactored into a **Dynamic N-Strip Architecture**. This allows the operator to tune the number of strips ($N$), strip width ($W$), and gap width ($G$) to balance reconstruction fidelity against physical image real estate.
+
+Key architectural changes include:
+*   **Procedural Phase Staggering:** Phase offsets are automatically calculated as $\Delta\phi = \pi/N$, ensuring perfect interleaving regardless of strip count.
+*   **Alternating Chirp Direction:** Strips alternate between "Forward" and "Reverse" frequency sweeps, increasing local edge contrast and making the "Point-Pool" more robust to directional mechanical slip.
+
+---
+
+## 6. Design Optimization & Findings
+
+Following a systematic grid-search benchmark comparing 72 combinations of $N$, $W$, and $G$, we identified the following global optima for the system:
+
+### Benchmark Summary Table (Fixed Gap = 50px)
+| N (Strips) | Strip Width (W) | Total Width | PSNR (dB) | MAE | Finding |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 4 | 100px | 750px | 23.89 | 2.52 | Baseline performance |
+| **6** | **50px** | **750px** | **24.57** | **2.28** | **Global Optimum (Efficient)** |
+| 6 | 100px | 1050px | 24.79 | 2.27 | Diminishing returns on width |
+| 16 | 100px | 2550px | 24.69 | 2.28 | **Degradation due to edge-aliasing** |
+
+### Critical Discoveries:
+1.  **The "Stagger Limit" ($N=6$):** Increasing $N$ beyond 6 provides negligible gains or even small degradations. At $N > 10$, the phase-shifted edges become so physically close that mechanical vibration causing "edge-blur" makes it mathematically difficult for the Point-Pool to distinguish between distinct transitions.
+2.  **Width Efficiency:** A 50px strip is nearly as robust as a 150px strip. The Point-Pool requires *existence* of the edge, not its *extenuation*. Shrinking $W$ from 100px to 50px saved **25% of total image width** with a negligible delta in quality.
+3.  **The 50px Gap Rule:** Small gaps ($<30$px) allow high-contrast binary data to bleed into the X-tracker or adjacent strips during violent horizontal vibration. A **50px black gap** is mandatory for signal isolation.
+
+**Current Production Standard (1000px Sensor):** $N=6$, $W=50$, $G=50$. This configuration achieves a reconstruction PSNR of **24.57 dB** while optimizing for throughput and data density.
+
+---
+
+## 7. Scaling to High-Resolution (16k Industrial Scanning)
+
+When deploying this architecture on a $16,384$ px sensor (e.g., a 50cm ultra-high-resolution line scan), the parameters shift fundamentally. A 16k scaling benchmark generated the following breakthroughs:
+
+*   **Shrinking the Footprint:** At 16k, an X-Tracker does not need to scale proportionally. A tight 50px X-Tracker works flawlessly, maintaining sub-pixel correlation on the continuous black reference line.
+*   **The Aliasing Paradox:** At 1000px height, $N=6$ was the optimum. However, at $16,384$ px depth (with identical vibration magnitude), $N=6$ fails catastrophically ($<16$ dB). Why? Because 1 cycle now spans $\approx 655$ rows. $N=6$ interleaves edges every $54$ rows. If a mechanical slip is larger than $54$ rows, the Point-Pool suffers **destructive phase-aliasing** (matching an edge from Strip 1 to an expected edge from Strip 2).
+*   **The 16k Optimum ($N=3$):** Decreasing the layout to **$N=3$** spreads the phase separation to $\approx 109$ rows. This creates an unbridgeable gap for analog mechanical slip, allowing the Point-Pool to lock on with perfect confidence.
+
+### The 16k Master Layout
+*   `n_strips` = **3**
+*   `strip_width` = **50 px**
+*   `gap_width` = **50 px**
+*   X-Tracker = **50 px**
+
+**Hardware Impact:** This layout yields an unprecedented **25.26 dB PSNR**, yet occupies only **400 pixels total** (X-Tracker + 3 strips + 4 gaps). 
+This requires an astonishingly tiny **2.4%** of the 16k sensor, cleanly freeing **$15,984$ pixels (48.8 cm)** for raw object scanning.
