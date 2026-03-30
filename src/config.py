@@ -1,60 +1,57 @@
 import os
 from dataclasses import dataclass
+import numpy as np
 
 @dataclass
 class ScanConfig:
     """
-    Central configuration for the 4-column, 1000×400 ground-truth image.
+    Central configuration for the 4-strip staggered binary line-scan system.
 
-    Layout
-    ──────
-    Col 1 (  0– 99): X-Axis Reference  — white bg + 10-px black centre line
-    Col 2 (100–199): Low Chirp Fwd     —  5 → 25 cycles  (freq ↑, top→bottom)
-    Col 3 (200–299): Low Chirp Rev     — 25 →  5 cycles  (freq ↓, top→bottom)
-    Col 4 (300–399): V-Chirp           —  5 → 25 → 5     (freq ↑ top→mid, ↓ mid→bot)
+    Layout (1000 rows × 1000 columns)
+    ──────────────────────────────────
+    Col  Pixels      Content
+    X    0–  99     X-Axis Reference  : white bg + 10-px black centre line
+    gap  100– 149   Black gap
+     1   150– 249   Fwd  chirp  (phase 0)
+    gap  250– 299   Black gap
+     2   300– 399   Rev  chirp  (phase π/4)
+    gap  400– 449   Black gap
+     3   450– 549   Fwd  chirp  (phase π/2)
+    gap  550– 599   Black gap
+     4   600– 699   Rev  chirp  (phase 3π/4)
+    gap  700– 999   Black
 
-    The three chirp strips form a complementary set:
-      • Fwd  :  f_inst(t) = 5  + 20·t
-      • Rev  :  f_inst(t) = 25 − 20·t
-      • V    :  f_inst(t) = 5  + 20·(2t)  for t ∈ [0, 0.5)
-                           = 25 − 20·(2t−1) for t ∈ [0.5, 1)
-    Sum of Fwd+Rev is constant (30 cy), uniquely pinning t globally.
-    The V-strip adds a second constraint that resolves the top/bottom half
-    ambiguity that would otherwise arise if Fwd or Rev alone were used.
+    The X-reference is on the LEFT, isolated from the chirp strips by a 50-px
+    black gap. This is the same design as the 34.8 dB gold standard that was
+    validated in the binary-vs-continuous benchmark.
     """
 
-    # ── Image Dimensions ──────────────────────────────────────────────────────
     height: int = 1000
-    width:  int = 400      # 4 × 100-px columns
+    width:  int = 1000
 
-    # ── Column 1: X-Axis Reference (Vibration Tracker) ───────────────────────
-    col1_start: int = 0
-    col1_end:   int = 100
-    x_line_start: int = 45
-    x_line_end:   int = 55
+    # ── X-Axis Reference (Vibration Tracker) ─────────────────────────────────
+    col1_start:  int   = 0
+    col1_end:    int   = 100
+    x_line_start: int  = 45
+    x_line_end:   int  = 55
     x_tracker_expected_center: float = 49.5
 
-    # ── Column 2: Low Chirp Forward  (5 → 25 cycles, top-to-bottom) ──────────
-    col2_start: int   = 100
-    col2_end:   int   = 200
-    col2_f0:    float = 5.0
-    col2_f1:    float = 25.0
+    # ── 4 Staggered Binary Chirp Strips ──────────────────────────────────────
+    # phase-shifted to interleave edges for the Point-Pool decoder
+    f0: float = 5.0
+    f1: float = 25.0
 
-    # ── Column 3: Low Chirp Reversed (25 → 5 cycles, bottom-to-top) ──────────
-    col3_start: int   = 200
-    col3_end:   int   = 300
-    col3_f0:    float = 25.0
-    col3_f1:    float = 5.0
+    # computed in __post_init__
+    strips: object = None   # list of (col_start, col_end, mode, phase_offset)
 
-    # ── Column 4: V-Chirp (5→25 top-to-mid, then 25→5 mid-to-bottom) ─────────
-    # The column is split at the midpoint row.  Each half is an independent
-    # linear-frequency chirp compressed into 500 rows.
-    # f_edge = frequency at both ends (top row and bottom row)
-    # f_peak = frequency at the midpoint row (row 500)
-    col4_start:  int   = 300
-    col4_end:    int   = 400
-    col4_f_edge: float = 5.0    # frequency at row 0 and row 999
-    col4_f_peak: float = 25.0   # frequency at row 500 (midpoint)
+    def __post_init__(self):
+        self.strips = [
+            (150, 250, "fwd", 0.0),
+            (300, 400, "rev", np.pi / 4),
+            (450, 550, "fwd", np.pi / 2),
+            (600, 700, "rev", 3 * np.pi / 4),
+        ]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Path Management
