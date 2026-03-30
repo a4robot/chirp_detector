@@ -101,12 +101,14 @@ When deploying this architecture on a $16,384$ px sensor (e.g., a 50cm ultra-hig
 
 | N (Strips) | Strip W | Gap W | Tot W | PSNR (dB) | MAE | Finding |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | 50px | 50px | 200px | 9.17 | 32.86 | Severe temporal undersampling |
-| 2 | 50px | 50px | 300px | 20.96 | 3.27 | Sub-optimal reconstruction |
-| 3 | 50px | 50px | 400px | 23.58 | 2.22 | Baseline acceptable |
-| 4 | 50px | 50px | 500px | 25.59 | 1.73 | High precision |
-| 5 | 50px | 50px | 600px | 25.40 | 1.72 | Reaching asymptotic limit |
-| **6** | **50px** | **50px** | **700px** | **26.20** | **1.57** | **The Global 16k Optimum** |
+| 1 | 50px | 50px | 200px | 10.14 | 26.30 | Severe temporal undersampling |
+| 2 | 50px | 50px | 300px | 21.63 | 2.80  | Sub-optimal reconstruction |
+| 3 | 50px | 50px | 400px | 24.09 | 1.98  | Baseline acceptable |
+| 4 | 50px | 50px | 500px | 26.01 | 1.58  | High precision jump |
+| 5 | 50px | 50px | 600px | 25.75 | 1.59  | Resonant variance |
+| **6** | **50px** | **50px** | **700px** | **26.50** | **1.47** | **The Optimal Return on Space** |
+| 7 | 50px | 50px | 800px | 26.76 | 1.41  | Asymptotic plateau begins |
+| 8 | 50px | 50px | 900px | 26.80 | 1.40  | Diminished Returns (Limit Reached) |
 
 *(Total Width calculations include the initial 50px X-Tracker plus intervening 50px gaps)*
 
