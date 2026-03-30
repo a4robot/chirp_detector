@@ -23,6 +23,60 @@ class DSPReconstructor:
     def __init__(self, config: ScanConfig):
         self.cfg = config
 
+    def _pava(self, x):
+        """
+        Pool Adjacent Violators Algorithm (PAVA)
+        Strictly monotonic non-decreasing isotonic regression.
+        """
+        n = x.shape[0]
+        v = np.copy(x)
+        lvl = np.arange(n)
+        w = np.ones(n)
+        while True:
+            diff = np.diff(v)
+            if np.all(diff >= 0):
+                break
+            i = np.where(diff < 0)[0][0]
+            # Pool i and i+1
+            v_new = (w[i] * v[i] + w[i+1] * v[i+1]) / (w[i] + w[i+1])
+            v[i] = v_new
+            w[i] += w[i+1]
+            v = np.delete(v, i+1)
+            w = np.delete(w, i+1)
+            
+            # Expand the pooled value back to the representative indices if needed,
+            # but simpler is to reconstruct the full array at the end from weights.
+            # Let's use a more standard iterative approach for robustness.
+            
+        # Re-expand pooled values
+        # (Actually, a simpler O(n) stack-based PAVA is better)
+        return self._pava_stack(x)
+
+    def _pava_stack(self, y):
+        n = len(y)
+        if n == 0: return y
+        # Stack stores (value, weight, count)
+        # We use count to know how many elements this pool represents
+        stack = [] # list of [sum_y, weight]
+        for val in y:
+            cur_sum = float(val)
+            cur_weight = 1.0
+            while stack and (stack[-1][0]/stack[-1][1] > cur_sum/cur_weight):
+                prev_sum, prev_weight = stack.pop()
+                cur_sum += prev_sum
+                cur_weight += prev_weight
+            stack.append((cur_sum, cur_weight))
+        
+        # Expand
+        res = np.zeros(n)
+        idx = 0
+        for s, w in stack:
+            avg = s / w
+            count = int(round(w))
+            res[idx:idx+count] = avg
+            idx += count
+        return res
+
     # ── Step 1: Horizontal vibration from X-ref line ─────────────────────────
 
     def detect_horizontal_vibration(self, dist_img: np.ndarray) -> np.ndarray:
@@ -93,21 +147,32 @@ class DSPReconstructor:
         if len(all_pts) < 10:
             return np.linspace(0, H - 1, dist_img.shape[0])
 
-        # Pool → deduplicate distorted-row duplicates → PCHIP
+        # Pool → average by distorted-row (D) → Isotonic (PAVA) → PCHIP
         bucket: dict = {}
         for d, i in all_pts:
             bucket.setdefault(d, []).append(i)
-        s_d = sorted(bucket)
-        s_i = [float(np.mean(bucket[k])) for k in s_d]
+        
+        s_d = np.array(sorted(bucket.keys()))
+        s_i_raw = np.array([float(np.mean(bucket[k])) for k in s_d])
 
-        # Median outlier removal on residuals
+        # Step 4: Isotonic Regression (Mathematical Upgrade)
+        # Instead of RANSAC windows, we enforce the physical law of monotonicity globally.
+        s_i_iso = self._pava_stack(s_i_raw)
+
+        # To keep PCHIP happy, we need STRICT monotonicity (non-zero derivatives)
+        # and we filter out points that were heavily "pooled" (outliers).
         clean_d, clean_i = [], []
-        residuals = [s_i[j] - s_d[j] for j in range(len(s_i))]
-        for j in range(len(s_i)):
-            lo, hi = max(0, j - 5), min(len(s_i), j + 6)
-            if abs(residuals[j] - float(np.median(residuals[lo:hi]))) < 20.0:
-                clean_d.append(s_d[j])
-                clean_i.append(s_i[j])
+        
+        if len(s_d) > 0:
+            clean_d.append(s_d[0])
+            clean_i.append(s_i_iso[0])
+            for j in range(1, len(s_d)):
+                # If isotonic regression flattened this point into its neighbor,
+                # it means it was a violator/noise. We only keep points that
+                # maintain a minimum positive delta to ensure sub-pixel curve fit.
+                if s_i_iso[j] > clean_i[-1] + 1e-5:
+                    clean_d.append(s_d[j])
+                    clean_i.append(s_i_iso[j])
 
         if len(clean_d) < 5:
             return np.linspace(0, H - 1, dist_img.shape[0])
@@ -138,8 +203,10 @@ class DSPReconstructor:
         max_search = max(40, int(3 * expected_interval))
         max_search = min(max_search, len(ie) - 5)
 
-        # Scoring uses more edge pairs for higher-frequency strips (denser data)
-        n_score_pairs = max(5, min(20, len(de) // 3, len(ie) // 3))
+        # Scoring uses a small local window (n=5) for robustness.
+        # We normalize interval errors by the expected interval to make the
+        # scoring frequency-invariant (otherwise high-freq strips always win).
+        n_score_pairs = 5
 
         best_score, best_off = -1.0, 0
         for off in range(max_search):
@@ -148,8 +215,15 @@ class DSPReconstructor:
             m = min(n_score_pairs, len(de), len(ie) - off)
             if m < 3:
                 continue
+            
+            # Core Score: Inverse of Normalized Interval Error.
+            # We add a tiny 'minimal-drift' bias (dist/5000) to break ties 
+            # in periodic low-frequency signals (e.g. Strip 0 in Vernier).
+            # This prevents jumping to a different chirp period if intervals are similar.
             interval_err = np.sum(np.abs(np.diff(de[:m]) - np.diff(ie[off:off+m])))
-            score = 1.0 / (interval_err + 1e-6)
+            dist_bias = np.abs(ie[off] - de[0]) / 5000.0
+            score = 1.0 / ( (interval_err / expected_interval) + dist_bias + 1e-6 )
+            
             if score > best_score:
                 best_score, best_off = score, off
 
