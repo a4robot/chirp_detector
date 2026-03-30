@@ -143,53 +143,52 @@ class DSPReconstructor:
 
     def restore_vertical_phase_mapping(self, distorted_image: np.ndarray) -> np.ndarray:
         """
-        Build a source-row mapping for every distorted row using TWO complementary
-        chirp strips fused by confidence weighting.
+        Build a source-row mapping using THREE complementary chirp strips.
 
         Strip layout
         ------------
-        • Col 2 (Fwd,  5→25 cy) : frequency increases top→bottom.
-        • Col 3 (Rev, 25→ 5 cy) : frequency decreases top→bottom (mirror of col2).
+        • Col 2 (Fwd,  5→25)      : freq ↑ top→bottom
+        • Col 3 (Rev, 25→ 5)      : freq ↓ top→bottom (mirror of col2)
+        • Col 4 (V,    5→25→5)    : freq ↑ top→mid, freq ↓ mid→bottom
 
-        Together: inst_freq_fwd(t) + inst_freq_rev(t) = 30 cy everywhere (constant).
-                  inst_freq_fwd(t) - inst_freq_rev(t) = 2·k·t  (linearly encodes t).
-
-        Both strips carry the same spatial information content so their
-        confidence weights are equal (no frequency-preference boost needed).
-        Edge-counting on the reversed strip is still exact: the only difference
-        is that k is negative, so the quadratic inversion produces t values
-        that count from the *bottom* — _estimate_source_y_single_strip handles
-        this correctly because it matches observed edges to the ideal profile
-        which was also generated with f0=25, f1=5.
+        The Fwd+Rev pair pins global position (their freq-sum is constant at 30).
+        The V-strip adds an independent constraint that is locally ambiguous
+        (symmetric around row 500) but breaks ties when fused with col2/col3.
 
         Returns
         -------
         np.ndarray  shape (N_distorted,)  — source row index ∈ [0, height-1]
         """
-        strips = [
+        all_estimates  = []
+        all_confidence = []
+
+        # ── Forward and Reversed single-chirp strips ──────────────────────────
+        for (cs, ce, f0, f1) in [
             (self.cfg.col2_start, self.cfg.col2_end,
              self.cfg.col2_f0,    self.cfg.col2_f1),
             (self.cfg.col3_start, self.cfg.col3_end,
              self.cfg.col3_f0,    self.cfg.col3_f1),
-        ]
-
-        all_estimates  = []
-        all_confidence = []
-
-        for (cs, ce, f0, f1) in strips:
+        ]:
             est, conf = self._estimate_source_y_single_strip(
                 distorted_image, cs, ce, f0, f1)
             all_estimates.append(est)
             all_confidence.append(conf)
 
-        estimates  = np.array(all_estimates)    # (2, N)
-        confidence = np.array(all_confidence)   # (2, N)
+        # ── V-Chirp strip (two-segment) ───────────────────────────────────────
+        est_v, conf_v = self._estimate_source_y_v_strip(
+            distorted_image,
+            self.cfg.col4_start, self.cfg.col4_end,
+            self.cfg.col4_f_edge, self.cfg.col4_f_peak)
+        all_estimates.append(est_v)
+        all_confidence.append(conf_v)
+
+        estimates  = np.array(all_estimates)    # (3, N)
+        confidence = np.array(all_confidence)   # (3, N)
 
         total_weight = confidence.sum(axis=0)
         denominator  = np.where(total_weight > 1e-6, total_weight, 1.0)
         fused        = (estimates * confidence).sum(axis=0) / denominator
 
-        # Fallback to linear ramp where both strips lose confidence
         fallback = np.linspace(0.0, self.cfg.height - 1, len(fused))
         fused    = np.where(total_weight > 1e-6, fused, fallback)
 
@@ -396,10 +395,87 @@ class DSPReconstructor:
         confidence   = np.clip(local_rms / expected_rms, 0.0, 1.0)
         
         # Penalize implausibly fast frequency (out of band)
-        f_inst     = f0 + k * (source_y / (H - 1))
+        f_lo = min(f0, f1)
+        f_hi = max(f0, f1)
+        f_inst     = f_lo + abs(k) * (source_y / (H - 1))
         margin     = 2.0
-        in_band    = (f_inst >= f0 - margin) & (f_inst <= f1 + margin)
+        in_band    = (f_inst >= f_lo - margin) & (f_inst <= f_hi + margin)
         confidence = confidence * in_band.astype(float)
+
+        return source_y, confidence
+
+    def _estimate_source_y_v_strip(self,
+                                   distorted_image: np.ndarray,
+                                   col_start: int, col_end: int,
+                                   f_edge: float, f_peak: float,
+                                   ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Edge-based source-row estimation for the V-chirp strip.
+
+        The V-chirp is generated in two independent half-segments:
+          • Top half (rows 0 … H//2−1): chirp from f_edge → f_peak
+          • Bot half (rows H//2 … H−1): chirp from f_peak → f_edge
+
+        The ideal binary profile is reconstructed the same way as in the
+        creator, giving us a full-height (H,) reference edge sequence.
+        Observed distorted edges are then matched 1-to-1 against it.
+
+        Confidence is computed from the local AC-RMS of the distorted column,
+        the same way as _estimate_source_y_single_strip.
+        """
+        H      = float(self.cfg.height)
+        n_rows = distorted_image.shape[0]
+        half   = int(H) // 2
+        rest   = int(H) - half
+
+        # ── 1. Build ideal V-chirp binary profile ────────────────────────────
+        def _chirp_seg(n: int, f0: float, f1: float) -> np.ndarray:
+            t     = np.linspace(0.0, 1.0, n, endpoint=False)
+            k     = f1 - f0
+            phase = 2.0 * np.pi * (f0 * t + 0.5 * k * t ** 2)
+            return (np.sin(phase) >= 0).astype(int)
+
+        ideal_binary = np.concatenate([
+            _chirp_seg(half, f_edge, f_peak),   # top ↑
+            _chirp_seg(rest, f_peak, f_edge),   # bot ↓
+        ])
+
+        # ── 2. Extract distorted binary column ────────────────────────────────
+        raw         = distorted_image[:, col_start:col_end].mean(axis=1)
+        dist_binary = (raw >= 128).astype(int)
+
+        # ── 3. Confidence from local AC-RMS ───────────────────────────────────
+        f_mean       = (f_edge + f_peak) / 2.0
+        win          = max(5, int(H / f_mean * 2))
+        raw_float    = raw.astype(float)
+        raw_dc       = uniform_filter1d(raw_float, size=win, mode='nearest')
+        raw_ac       = raw_float - raw_dc
+        local_rms    = np.sqrt(uniform_filter1d(raw_ac ** 2, size=win, mode='nearest'))
+        confidence   = np.clip(local_rms / 127.5, 0.0, 1.0)
+
+        # ── 4. Detect edges in both ideal and distorted profiles ──────────────
+        ideal_diff  = np.diff(ideal_binary)
+        dist_diff   = np.diff(dist_binary)
+
+        ideal_edges = np.where(ideal_diff != 0)[0].astype(float)
+        dist_edges  = np.where(dist_diff  != 0)[0].astype(float)
+
+        if len(dist_edges) < 2 or len(ideal_edges) < 2:
+            return np.linspace(0.0, H - 1, n_rows), confidence * 0.0
+
+        # ── 5. Align polarity and match 1-to-1 ───────────────────────────────
+        ideal_start = 0
+        if ideal_diff[int(ideal_edges[0])] != dist_diff[int(dist_edges[0])]:
+            ideal_start = 1
+
+        min_len       = min(len(ideal_edges) - ideal_start, len(dist_edges))
+        matched_ideal = ideal_edges[ideal_start: ideal_start + min_len]
+        matched_dist  = dist_edges[:min_len]
+
+        # ── 6. Interpolate to all rows via PCHIP ──────────────────────────────
+        pchip    = PchipInterpolator(matched_dist, matched_ideal, extrapolate=True)
+        all_rows = np.arange(n_rows, dtype=float)
+        source_y = np.clip(pchip(all_rows), 0.0, H - 1)
 
         return source_y, confidence
 
