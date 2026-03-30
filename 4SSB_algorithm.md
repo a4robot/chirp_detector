@@ -16,11 +16,17 @@ In a binary chirp, physical space is encoded via frequency transitions (edges). 
 
 This interleaves the transitions. A 25-cycle limit per strip now yields **$4 \times 50 = 200$ perfectly distributed edges** across the scan length, multiplying the effective sampling rate by four without demanding higher physical print/camera resolution.
 
+![Figure 1: Staggered Phase Encoding Principle](figures/staggered_phase_principle.png)
+> **Image Generation Prompt:** A technical diagram showing 4 parallel vertical binary chirp strips. Each strip has square-wave patterns (black and white blocks) that are slightly offset vertically from each other (phase-shifted). Highlight with colored horizontal lines how the edges (transitions) from different strips interleave to create a much denser sampling grid of edges than any single strip alone. Professional, clean vector style.
+
 ---
 
 ## 2. The "Point-Pool" Fusion Algorithm
 
 To convert the staggered binary strips back into a sub-pixel distortion map (`target_y` vs `distorted_y`), the algorithm employs a **Point-Pool Fusion** strategy instead of averaging independent estimates.
+
+![Figure 2: The Point-Pool Fusion Process](figures/point_pool_process.png)
+> **Image Generation Prompt:** A conceptual illustration of the Point-Pool process. Show 4 separate streams of discrete points (representing edges from 4 strips) merging into a single, dense "pool" of points. Then show a smooth, continuous curve (the PCHIP spline) being fitted through this unified dense point cloud. Use distinct colors for points from different strips and a bold contrasting color for the final spline. Clear, instructional infographic style.
 
 ### Algorithm Steps:
 1.  **Independent Edge Harvesting:** For each of the 4 strips, extract the distorted sequence of edges (black-to-white and white-to-black transitions).
@@ -75,6 +81,9 @@ graph TD
 ### Why it beats the 1-Strip Binary approach:
 *   **Resolution Ceiling:** A 1-strip binary layout is limited by the optical threshold (MTF) of the camera. Push the frequency too high, and edges blur into gray mush. 
 *   **Temporal Blind Spots:** Between any two edges on a 1-strip layout, there is zero data. If the camera slips within that gap, the decoder interpolates blindly. 4SSB populates those blind spots with adjacent staggered edges, ensuring no distortion goes unmeasured.
+
+![Figure 3: Comparative Analysis](figures/comparative_analysis.png)
+> **Image Generation Prompt:** A three-panel comparison diagram. Panel A: "1-Strip Binary" showing sparse sampling points and a slightly wavy, inaccurate reconstruction line. Panel B: "4-Strip Averaging" showing multiple oscillating lines (ringing artifacts) being averaged into a messy result. Panel C: "4SSB Point-Pool" showing a dense cloud of points and a perfectly smooth, accurate reconstruction line passing through them. High contrast, technical comparison style.
 
 ### Why "Point-Pool" beats 4-Strip Average or Winner-Take-All:
 
