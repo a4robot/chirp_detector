@@ -95,37 +95,36 @@ By acknowledging that *the data is point-cloud data, not continuous data*, we av
 
 ## 5. Scaling to High-Resolution (16k Industrial Scanning)
 
-When deploying this architecture on a $16,384$ px sensor (e.g., a 50cm ultra-high-resolution line scan), the performance dynamics scale phenomenally well.
+When deploying this architecture on a line-scan camera with a $16,384$ px active sensor array (e.g., a 50cm ultra-high-resolution scan), the objective fundamentally shifts. 
+Because the temporal length of a continuous line-scan represents infinite continuous *time*, the spatial tracking frequency ($f_0$ to $f_1$) remains identical. The only true architectural constraint is **minimizing the horizontal footprint** on the active detector so that maximum imaging real estate is dedicated to the object.
 
-### The 16k Benchmark Results (Fixed $W=50$, $Gap=50$)
+### The Footprint Optimization Benchmark ($W=50$px, $Gap=50$px)
 
-| N (Strips) | Strip W | Gap W | Tot W | PSNR (dB) | MAE | Finding |
+| N (Strips) | $f_1$ (Freq) | Total Footprint | Width % of 16k | PSNR (dB) | MAE | Finding |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | 50px | 50px | 200px | 10.14 | 26.30 | Severe temporal undersampling |
-| 1 (Double Freq) | 50px | 50px | 200px | 14.82 | 9.73  | Still undersampled on 16k length |
-| 2 | 50px | 50px | 300px | 21.63 | 2.80  | Sub-optimal reconstruction |
-| 3 | 50px | 50px | 400px | 24.09 | 1.98  | Baseline acceptable |
-| 4 | 50px | 50px | 500px | 26.01 | 1.58  | High precision jump |
-| 5 | 50px | 50px | 600px | 25.75 | 1.59  | Resonant variance |
-| **6** | **50px** | **50px** | **700px** | **26.50** | **1.47** | **The Optimal Return on Space** |
-| 7 | 50px | 50px | 800px | 26.76 | 1.41  | Asymptotic plateau begins |
-| 8 | 50px | 50px | 900px | 26.80 | 1.40  | Diminished Returns (Limit Reached) |
+| **1** | 25 | 200px | 1.22% | 12.14 | 16.99 | Temporal Undersampling |
+| **1** | **50** (Double) | 200px | 1.22% | **21.65** | **3.88** | Fails to match multi-strip |
+| **2** | 25 | 300px | 1.83% | 23.95 | 2.77 | Acceptable geometric tracking |
+| **3** | 25 | 400px | **2.44%** | **24.14** | **2.63** | **Optimal Baseline Limit** |
+| **4** | 25 | 500px | 3.05% | 24.16 | 2.56 | Redundant |
+| **6** | 25 | 700px | 4.27% | 24.27 | 2.44 | Redundant |
 
-*(Total Width calculations include the initial 50px X-Tracker plus intervening 50px gaps)*
+*(Total Footprint includes a tightly bounded 50px X-Tracker + internal $N$ strips + internal gaps)*
 
-### Why N=1 Binary Fails so Hard (The Undersampling Problem)
-It is common to assume that $N=1$ binary should yield equivalent performance ($\approx 24$ dB) to an $N=1$ continuous greyscale sine-wave. This is mathematically impossible. A continuous sine-wave provides sub-pixel phase data on **every single row**. A binary $N=1$ strip only provides data transitions at the hard black/white edges (e.g., exactly 50 times across the entire image). 
-
-You physically cannot reconstruct thousands of rows of high-frequency mechanical vibration using only 50 data points. This is why scaling to $N=6$ staggered strips is mandatory—it interleaves $6 \times 50 = 300$ continuous tracking edges into the visual layout, fully recovering the high-frequency sampling rate of continuous chirps without the lighting vulnerabilities!
+### The Double-Frequency Trap ($N=1$, $f_1=50$)
+It is tempting to try and save space by reverting to a single strip ($N=1$) and simply doubling the temporal chirp frequency ($f_1=50$) to create more data edges. 
+However, the data reveals that while doubling the frequency drastically improves $N=1$ (jumping from 12.14 dB to 21.65 dB), it still mathematically fails to match staggered tracking. $N=1$ relies on a single monotonic interval—it has no geometric cross-strip validation. **$N \ge 2$ staggered strips cross-validate each other radially**, instantly raising the sub-pixel accuracy to $\approx 24\text{ dB}$ without requiring smaller, highly MTF-susceptible high-frequency black/white blocks.
 
 ---
 
-## 6. The Final 16k Production Layout
+## 6. The 16k Production Layout
 
-*   `n_strips` = **6**
+To optimize purely for line-scan throughput while capturing the mechanical safety net of $24\text{ dB}$ precision, the configuration mathematically asymptotes at **$N=3$**.
+
+*   `n_strips` = **3**
 *   `strip_width` = **50 px**
 *   `gap_width` = **50 px**
 *   `x_tracker` = **50 px**
 
-**Hardware Impact:** This layout geometry yields an unprecedented **26.20 dB PSNR** on a $16,384$ px canvas.
-The complete footprint occupies a microscopic **700 pixels** (4.2% of a 16k sensor bandwidth), cleanly freeing **$15,684$ pristine pixels** identically on every scan for uninhibited, raw object scanning.
+**Hardware Impact:** This layout yields **24.14 dB PSNR** sub-pixel vibration resilience, yet only consumes an ultra-lean footprint of **400 pixels**.
+This represents a microscopic **2.44% overhead** on a $16,384$ px sensor, gracefully freeing **$15,984$ pixels (48.8 cm)** for raw, uninhibited object scanning.
