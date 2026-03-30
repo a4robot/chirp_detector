@@ -93,11 +93,12 @@ class DSPReconstructor:
         s_d = sorted(bucket)
         s_i = [float(np.mean(bucket[k])) for k in s_d]
 
-        # Median outlier removal
+        # Median outlier removal on residuals
         clean_d, clean_i = [], []
+        residuals = [s_i[j] - s_d[j] for j in range(len(s_i))]
         for j in range(len(s_i)):
             lo, hi = max(0, j - 5), min(len(s_i), j + 6)
-            if abs(s_i[j] - float(np.median(s_i[lo:hi]))) < 20.0:
+            if abs(residuals[j] - float(np.median(residuals[lo:hi]))) < 20.0:
                 clean_d.append(s_d[j])
                 clean_i.append(s_i[j])
 
