@@ -102,6 +102,7 @@ When deploying this architecture on a $16,384$ px sensor (e.g., a 50cm ultra-hig
 | N (Strips) | Strip W | Gap W | Tot W | PSNR (dB) | MAE | Finding |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | 1 | 50px | 50px | 200px | 10.14 | 26.30 | Severe temporal undersampling |
+| 1 (Double Freq) | 50px | 50px | 200px | 14.82 | 9.73  | Still undersampled on 16k length |
 | 2 | 50px | 50px | 300px | 21.63 | 2.80  | Sub-optimal reconstruction |
 | 3 | 50px | 50px | 400px | 24.09 | 1.98  | Baseline acceptable |
 | 4 | 50px | 50px | 500px | 26.01 | 1.58  | High precision jump |
