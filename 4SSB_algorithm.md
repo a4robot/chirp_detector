@@ -100,14 +100,14 @@ Because the temporal length of a continuous line-scan represents infinite contin
 
 ### The Footprint Optimization Benchmark ($W=50$px, $Gap=50$px)
 
-| N (Strips) | $f_1$ (Freq) | Total Footprint | Width % of 16k | PSNR (dB) | MAE | Finding |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1** | 25 | 200px | 1.22% | 12.14 | 16.99 | Temporal Undersampling |
-| **1** | **50** (Double) | 200px | 1.22% | **21.65** | **3.88** | Fails to match multi-strip |
-| **2** | 25 | 300px | 1.83% | 23.95 | 2.77 | Acceptable geometric tracking |
-| **3** | 25 | 400px | **2.44%** | **24.14** | **2.63** | **Optimal Baseline Limit** |
-| **4** | 25 | 500px | 3.05% | 24.16 | 2.56 | Redundant |
-| **6** | 25 | 700px | 4.27% | 24.27 | 2.44 | Redundant |
+| N (Strips) | $f_1$ (Freq) | Total Footprint | Width % of 16k | PSNR (dB) | MSE | MAE | Finding |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **1** | 25 | 200px | 1.22% | 12.14 | 3974.83 | 16.99 | Temporal Undersampling |
+| **1** | **50** (Double) | 200px | 1.22% | **21.65** | **444.45** | **3.88** | Fails to match multi-strip |
+| **2** | 25 | 300px | 1.83% | 23.95 | 261.64 | 2.77 | Acceptable geometric tracking |
+| **3** | 25 | 400px | **2.44%** | **24.14** | **250.69** | **2.63** | **Optimal Baseline Limit** |
+| **4** | 25 | 500px | 3.05% | 24.16 | 249.75 | 2.56 | Redundant |
+| **6** | 25 | 700px | 4.27% | 24.27 | 243.06 | 2.44 | Redundant |
 
 *(Total Footprint includes a tightly bounded 50px X-Tracker + internal $N$ strips + internal gaps)*
 
