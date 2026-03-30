@@ -27,6 +27,9 @@ class ScanConfig:
     strip_width: int = 50
     gap_width: int = 50
 
+    # ── Vernier Multi-Frequency Effect ───────────────────────────────────────
+    vernier_frequencies: list = None
+
     strips: list = None
 
     def __post_init__(self):
@@ -36,10 +39,16 @@ class ScanConfig:
         for i in range(self.n_strips):
             # Alternating direction makes adjacent frequencies somewhat distinct.
             mode = "fwd" if i % 2 == 0 else "rev"
-            # Precisely stagger the phase by pi/N across all strips.
-            # (Because sin(p) >= 0 has 2 edges per 2pi cycle, we divide pi by N)
+            
+            # Phase staggering
             phase = i * np.pi / self.n_strips
-            self.strips.append((current_x, current_x + self.strip_width, mode, phase))
+            
+            # Vernier frequency mapping
+            f1_strip = self.f1
+            if self.vernier_frequencies and i < len(self.vernier_frequencies):
+                f1_strip = self.vernier_frequencies[i]
+                
+            self.strips.append((current_x, current_x + self.strip_width, mode, phase, f1_strip))
             current_x += self.strip_width + self.gap_width
             
         # Add a final gap on the right

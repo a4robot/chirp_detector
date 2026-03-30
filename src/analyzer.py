@@ -68,8 +68,8 @@ class DSPReconstructor:
         t_ref  = np.linspace(0.0, 1.0, H, endpoint=False)
         all_pts = []
 
-        for cs, ce, mode, phase in cfg.strips:
-            f0, f1 = cfg.f0, cfg.f1
+        for cs, ce, mode, phase, f1_strip in cfg.strips:
+            f0, f1 = cfg.f0, f1_strip
             if mode == "rev":
                 f0, f1 = f1, f0
             k       = f1 - f0

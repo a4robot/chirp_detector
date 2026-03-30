@@ -40,8 +40,8 @@ class ImageSynthesizer:
 
         # ── 4 Staggered Binary Chirp Strips ────────────────────────────────────
         t = np.linspace(0.0, 1.0, cfg.height, endpoint=False)
-        for col_start, col_end, mode, phase in cfg.strips:
-            f0, f1 = cfg.f0, cfg.f1
+        for col_start, col_end, mode, phase, f1_strip in cfg.strips:
+            f0, f1 = cfg.f0, f1_strip
             if mode == "rev":
                 f0, f1 = f1, f0
             k = f1 - f0
