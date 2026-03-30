@@ -73,13 +73,20 @@ class DSPReconstructor:
             if mode == "rev":
                 f0, f1 = f1, f0
             k       = f1 - f0
+            # Build the ideal model using THIS strip's own f1_strip chirp rate.
+            # This is the key fix: incommensurable Vernier strips each get their
+            # own ideal interval sequence, preventing cross-contamination in the
+            # sliding-window alignment step.
             p_ideal = 2.0 * np.pi * (f0 * t_ref + 0.5 * k * t_ref ** 2) + phase
             ideal   = (np.sin(p_ideal) >= 0).astype(int)
 
             raw  = dist_img[:, cs:ce].mean(axis=1)
-            dist = (raw >= 128).astype(int)
+            dist_col = (raw >= 128).astype(int)
 
-            de, ie = self._match_edges(dist, ideal)
+            # Pass the expected mean interval for this strip so _match_edges
+            # can use a frequency-appropriate search window.
+            expected_interval = H / (f1_strip + f0)  # approx mean half-period
+            de, ie = self._match_edges(dist_col, ideal, expected_interval)
             for d, i in zip(de, ie):
                 all_pts.append((float(d), float(i)))
 
@@ -110,21 +117,39 @@ class DSPReconstructor:
         sy     = np.clip(pchip(rows), 0, H - 1)
         return self._mono(sy)
 
-    def _match_edges(self, db, ib):
-        """Slide the ideal edge sequence to find the best polarity-aligned start."""
+    def _match_edges(self, db, ib, expected_interval: float = 20.0):
+        """Slide the ideal edge sequence to find the best polarity-aligned start.
+
+        The search window is now calibrated to the per-strip chirp rate:
+        - For a low-frequency strip (large expected_interval), we look further.
+        - For a high-frequency strip (small expected_interval), we look tighter.
+        This prevents Vernier strips with very different f1_strip from being
+        mis-aligned against a shared global ideal sequence.
+        """
         de = np.where(np.diff(db) != 0)[0].astype(float)
         ie = np.where(np.diff(ib) != 0)[0].astype(float)
         dd = np.diff(db)[de.astype(int)]
-        id = np.diff(ib)[ie.astype(int)]
+        id_ = np.diff(ib)[ie.astype(int)]
         if len(de) < 5 or len(ie) < 5:
             return [], []
 
+        # Scale search window to at least 3 full expected half-periods so we
+        # can find the correct polarity start even with a large initial slip.
+        max_search = max(40, int(3 * expected_interval))
+        max_search = min(max_search, len(ie) - 5)
+
+        # Scoring uses more edge pairs for higher-frequency strips (denser data)
+        n_score_pairs = max(5, min(20, len(de) // 3, len(ie) // 3))
+
         best_score, best_off = -1.0, 0
-        for off in range(min(40, len(ie) - 5)):
-            if id[off] != dd[0]:
+        for off in range(max_search):
+            if id_[off] != dd[0]:          # polarity gate: must start same direction
                 continue
-            m = min(10, len(de), len(ie) - off)
-            score = 1.0 / (np.sum(np.abs(np.diff(de[:m]) - np.diff(ie[off:off+m]))) + 1e-6)
+            m = min(n_score_pairs, len(de), len(ie) - off)
+            if m < 3:
+                continue
+            interval_err = np.sum(np.abs(np.diff(de[:m]) - np.diff(ie[off:off+m])))
+            score = 1.0 / (interval_err + 1e-6)
             if score > best_score:
                 best_score, best_off = score, off
 
