@@ -5,29 +5,11 @@ import numpy as np
 @dataclass
 class ScanConfig:
     """
-    Central configuration for the 4-strip staggered binary line-scan system.
-
-    Layout (1000 rows × 1000 columns)
-    ──────────────────────────────────
-    Col  Pixels      Content
-    X    0–  99     X-Axis Reference  : white bg + 10-px black centre line
-    gap  100– 149   Black gap
-     1   150– 249   Fwd  chirp  (phase 0)
-    gap  250– 299   Black gap
-     2   300– 399   Rev  chirp  (phase π/4)
-    gap  400– 449   Black gap
-     3   450– 549   Fwd  chirp  (phase π/2)
-    gap  550– 599   Black gap
-     4   600– 699   Rev  chirp  (phase 3π/4)
-    gap  700– 999   Black
-
-    The X-reference is on the LEFT, isolated from the chirp strips by a 50-px
-    black gap. This is the same design as the 34.8 dB gold standard that was
-    validated in the binary-vs-continuous benchmark.
+    Central configuration for the N-strip staggered binary line-scan system.
+    Dynamically generates the layout based on strip quantity and dimensions.
     """
-
     height: int = 1000
-    width:  int = 1000
+    width:  int = 1000  # Will be dynamically overwritten
 
     # ── X-Axis Reference (Vibration Tracker) ─────────────────────────────────
     col1_start:  int   = 0
@@ -36,22 +18,32 @@ class ScanConfig:
     x_line_end:   int  = 55
     x_tracker_expected_center: float = 49.5
 
-    # ── 4 Staggered Binary Chirp Strips ──────────────────────────────────────
-    # phase-shifted to interleave edges for the Point-Pool decoder
+    # ── N Staggered Binary Chirp Strips ──────────────────────────────────────
     f0: float = 5.0
     f1: float = 25.0
+    
+    # ── Space Optimization Settings ──────────────────────────────────────────
+    n_strips: int = 6
+    strip_width: int = 50
+    gap_width: int = 50
 
-    # computed in __post_init__
-    strips: object = None   # list of (col_start, col_end, mode, phase_offset)
+    strips: list = None
 
     def __post_init__(self):
-        self.strips = [
-            (150, 250, "fwd", 0.0),
-            (300, 400, "rev", np.pi / 4),
-            (450, 550, "fwd", np.pi / 2),
-            (600, 700, "rev", 3 * np.pi / 4),
-        ]
-
+        self.strips = []
+        current_x = self.col1_end + self.gap_width
+        
+        for i in range(self.n_strips):
+            # Alternating direction makes adjacent frequencies somewhat distinct.
+            mode = "fwd" if i % 2 == 0 else "rev"
+            # Precisely stagger the phase by pi/N across all strips.
+            # (Because sin(p) >= 0 has 2 edges per 2pi cycle, we divide pi by N)
+            phase = i * np.pi / self.n_strips
+            self.strips.append((current_x, current_x + self.strip_width, mode, phase))
+            current_x += self.strip_width + self.gap_width
+            
+        # Add a final gap on the right
+        self.width = current_x
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Path Management

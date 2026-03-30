@@ -21,7 +21,7 @@ def run_pipeline():
     config = ScanConfig()
     
     # ── Step 1: Synthesize Reference ──
-    print("[1/3] Synthesizing Golden Reference (4-Strip Staggered Binary)...")
+    print("[1/3] Synthesizing Golden Reference (N-Strip Staggered Binary)...")
     synth = ImageSynthesizer(config)
     reference = synth.synthesize_reference_image()
     np.save(REF_NPY, reference)

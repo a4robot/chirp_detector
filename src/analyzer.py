@@ -36,9 +36,10 @@ class DSPReconstructor:
         for r in range(n):
             win = dist_img[r, s:e].astype(float)
             # anchor: darkest pixel in inner safe window (avoid bleed at edges)
-            safe_s = s + 15
-            safe_e = e - 15
-            anchor = int(np.argmin(win[15:-15])) + safe_s
+            safe_margin = max(2, min(15, (e - s - 10) // 2))
+            safe_s = s + safe_margin
+            safe_e = e - safe_margin
+            anchor = int(np.argmin(win[safe_margin:-safe_margin])) + safe_s
             if win[anchor - s] > 128:
                 continue
             lo = max(s, anchor - refine)
