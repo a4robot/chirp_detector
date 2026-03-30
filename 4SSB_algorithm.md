@@ -100,31 +100,38 @@ Because the temporal length of a continuous line-scan represents infinite contin
 
 ### The Footprint Optimization Benchmark ($W=50$px, $Gap=50$px)
 
-| N (Strips) | $f_1$ (Freq) | Total Footprint | Width % of 16k | PSNR (dB) | MSE | MAE | Finding |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1** | 25 | 200px | 1.22% | 12.14 | 3974.83 | 16.99 | Temporal Undersampling |
-| **1** | **50** (Double) | 200px | 1.22% | **21.65** | **444.45** | **3.88** | Fails to match multi-strip |
-| **2** | 25 | 300px | 1.83% | 23.95 | 261.64 | 2.77 | Acceptable geometric tracking |
-| **3** | 25 | 400px | **2.44%** | **24.14** | **250.69** | **2.63** | **Optimal Baseline Limit** |
-| **4** | 25 | 500px | 3.05% | 24.16 | 249.75 | 2.56 | Redundant |
-| **6** | 25 | 700px | 4.27% | 24.27 | 243.06 | 2.44 | Redundant |
+Recent experiments introduced **Multi-Frequency Vernier Scaling**, where strips run at slightly different frequencies ($f_1$ varies per strip). This mathematically eliminates harmonic resonance with mechanical vibrations.
+
+| N (Strips) | $f_1$ Frequencies | Total Footprint | Width % of 16k | PSNR (dB) | MSE | Finding |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **1** | 25 | 200px | 1.22% | 14.38 | 2499.23 | Temporal Undersampling |
+| **1** | **100** (Quad freq) | 200px | 1.22% | **22.56** | **360.97** | Fails to match multi-strip (No cross-validation) |
+| **3** | [25, 25, 25] (Std) | 400px | 2.44% | 24.37 | 238.03 | Standard Geometric Baseline |
+| **4** | [5.0, 11.7, 18.3, 25.0] | 500px | 3.05% | 25.04 | 204.24 | Excellent Linear Vernier |
+| **8** | [25, 50, 100, 200...] | 900px | 5.49% | **9.10** 💀 | **8130** | Catastrophic RANSAC Failure |
+| **2** | **[7.0, 11.3] (Golden)** | **300px** | **1.83%** | **25.24** | **194.68** | **Ultimate Pareto Optimum** |
 
 *(Total Footprint includes a tightly bounded 50px X-Tracker + internal $N$ strips + internal gaps)*
 
-### The Double-Frequency Trap ($N=1$, $f_1=50$)
-It is tempting to try and save space by reverting to a single strip ($N=1$) and simply doubling the temporal chirp frequency ($f_1=50$) to create more data edges. 
-However, the data reveals that while doubling the frequency drastically improves $N=1$ (jumping from 12.14 dB to 21.65 dB), it still mathematically fails to match staggered tracking. $N=1$ relies on a single monotonic interval—it has no geometric cross-strip validation. **$N \ge 2$ staggered strips cross-validate each other radially**, instantly raising the sub-pixel accuracy to $\approx 24\text{ dB}$ without requiring smaller, highly MTF-susceptible high-frequency black/white blocks.
+### The Fundamental Law of High Frequencies: "Too Many Edges Kills RANSAC"
+It is tempting to simply double $f_1$ at each strip (e.g., $N=8$ with `[25, 50, 100... 3200]`) to generate a massive point-pool. 
+However, the data reveals a critical failure mode: **geometric doubling generates so many edges (e.g., 956 edges in 1000 rows, avg 1.04px gap) that the RANSAC sliding-median filter (window=11) cannot distinguish between valid structural edges and mechanical noise.** It performs random rejection, destroying the PCHIP completely, dropping PSNR to a dismal 9.1 dB.
+
+Conversely, $N=1$ at `f1=100` proves that purely increasing frequency without cross-strip geometric validation only yields 22.56 dB. **Vernier geometry isn't primarily about edge count density; it's about geometric cross-validation across distinct periodic intervals.**
 
 ---
 
-## 6. The 16k Production Layout
+## 6. The 16k Production Layout: The Golden Ratio Vernier
 
-To optimize purely for line-scan throughput while capturing the mechanical safety net of $24\text{ dB}$ precision, the configuration mathematically asymptotes at **$N=3$**.
+To optimize purely for line-scan throughput while capturing the absolute maximum mechanical safety net, the configuration achieves a true Pareto optimum at **$N=2$ using Golden Ratio Vernier spacing**.
 
-*   `n_strips` = **3**
+By setting the bases using the golden ratio ($\varphi \approx 1.61803$), it minimizes harmonic resonance between the two strip frequencies, producing the most aperiodic, uniform edge interleaving possible without overwhelming the RANSAC filter.
+
+*   `n_strips` = **2**
+*   `vernier_frequencies` = **[7.0, 11.3]** (Base $7.0 \times \varphi^{0,1}$)
 *   `strip_width` = **50 px**
 *   `gap_width` = **50 px**
 *   `x_tracker` = **50 px**
 
-**Hardware Impact:** This layout yields **24.14 dB PSNR** sub-pixel vibration resilience, yet only consumes an ultra-lean footprint of **400 pixels**.
-This represents a microscopic **2.44% overhead** on a $16,384$ px sensor, gracefully freeing **$15,984$ pixels (48.8 cm)** for raw, uninhibited object scanning.
+**Hardware Impact:** This layout yields an unprecedented **25.24 dB PSNR** sub-pixel vibration resilience, yet only consumes an ultra-lean footprint of **300 pixels**.
+This represents a microscopic **1.83% overhead** on a $16,384$ px sensor, gracefully freeing **$16,084$ pixels (49.1 cm)** for raw, uninhibited object scanning.
