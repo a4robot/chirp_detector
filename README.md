@@ -18,31 +18,27 @@ A professional DSP tool to detect and reconstruct mechanical distortions in line
    ```
 
 ## Analyzing Real Scanned Files
-To analyze a real scanned image (PNG, BMP, or JPG):
-1. Place your scanned image in the `data/` directory (e.g., `data/scanned_image.png`).
-2. Run the analyzer separately using the following script (ensure your image size matches the configuration width):
-   ```python
-   # Example: analyze_scanned.py
-   import numpy as np
-   from PIL import Image
-   from src.config import ScanConfig
-   from src.analyzer import DSPReconstructor
 
-   cfg = ScanConfig()
-   # Load your scanned image and reference
-   scanned = np.array(Image.open("data/scanned_image.png").convert("L"))
-   reference = np.load("data/reference_image.npy")
+Use `analyze_scan.py` to restore a scanned calibration chart image (PNG, BMP, JPG, TIFF).
+No reference file is needed — it outputs `data/restored_image.png` directly.
 
-   recon = DSPReconstructor(cfg)
-   # Run the analysis pipeline
-   metrics = recon.evaluate_restoration_quality(reference, scanned)
-   print(f"PSNR: {metrics['psnr']} dB, MAE: {metrics['mae']}")
-   ```
-3. Execute the script:
-   ```bash
-   PYTHONPATH=. python analyze_scanned.py
-   ```
-3. Check the results in `data/` and `data/analysis_report.txt`.
+### Basic: Restore only
+```bash
+PYTHONPATH=. python analyze_scan.py data/scanned_image.png
+```
+
+### With quality metrics (PSNR / MAE)
+If you have the original reference image, pass `--reference` to compute PSNR and MAE.  
+Both images are auto-cropped to their common region before comparison.
+```bash
+PYTHONPATH=. python analyze_scan.py data/scanned_image.png --reference data/reference_image.png
+```
+
+### Output
+- `data/restored_image.png` — the de-distorted result
+- `data/analysis_report.txt` — PSNR/MAE (only when `--reference` is provided)
+
+4. Check the results in `data/`.
 
 ## Industrial Production Specs (Reference)
 This system is optimized for high-resolution industrial line-scan cameras (e.g., 16k sensors) with continuous longitudinal scanning.
