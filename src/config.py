@@ -8,15 +8,16 @@ class ScanConfig:
     Central configuration for the N-strip staggered binary line-scan system.
     Dynamically generates the layout based on strip quantity and dimensions.
     """
-    height: int = 1000
-    width:  int = 1000  # Will be dynamically overwritten
+    height: int = 20000
+    width:  int = 14975  # 457/500 * 16384 = 14974.976
 
-    # ── X-Axis Reference (Vibration Tracker) ─────────────────────────────────
-    col1_start:  int   = 0
-    col1_end:    int   = 100
-    x_line_start: int  = 45
-    x_line_end:   int  = 55
-    x_tracker_expected_center: float = 49.5
+    # ── Right X-Tracker (Horizontal Vibration Tracker) ───────────────────────
+    # Shifted left by 1409 px from 16384 baseline
+    col1_start:  int   = 13427
+    col1_end:    int   = 13577
+    x_line_start: int  = 13492
+    x_line_end:   int  = 13512
+    x_tracker_expected_center: float = 13502.0
 
     # ── N Staggered Binary Chirp Strips ──────────────────────────────────────
     f0: float = 5.0
@@ -26,6 +27,7 @@ class ScanConfig:
     n_strips: int = 6
     strip_width: int = 50
     gap_width: int = 50
+    first_gap: int = 0        # Gap between x-tracker and first strip (0 = adjacent)
 
     # ── Vernier Multi-Frequency Effect ───────────────────────────────────────
     vernier_frequencies: list = None
@@ -34,7 +36,7 @@ class ScanConfig:
 
     def __post_init__(self):
         self.strips = []
-        current_x = self.col1_end + self.gap_width
+        current_x = self.col1_end + self.first_gap
         
         for i in range(self.n_strips):
             # Alternating direction makes adjacent frequencies somewhat distinct.
@@ -51,8 +53,8 @@ class ScanConfig:
             self.strips.append((current_x, current_x + self.strip_width, mode, phase, f1_strip))
             current_x += self.strip_width + self.gap_width
             
-        # Add a final gap on the right
-        self.width = current_x
+        # Target calibration image size is set for 457mm target width
+        self.width = 14975
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Path Management

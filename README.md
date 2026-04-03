@@ -16,9 +16,50 @@ A professional DSP tool to detect and reconstruct mechanical distortions in line
    ```bash
    python main.py
    ```
+
+## Analyzing Real Scanned Files
+To analyze a real scanned image (PNG, BMP, or JPG):
+1. Place your scanned image in the `data/` directory (e.g., `data/scanned_image.png`).
+2. Run the analyzer separately using the following script (ensure your image size matches the configuration width):
+   ```python
+   # Example: analyze_scanned.py
+   import numpy as np
+   from PIL import Image
+   from src.config import ScanConfig
+   from src.analyzer import DSPReconstructor
+
+   cfg = ScanConfig()
+   # Load your scanned image and reference
+   scanned = np.array(Image.open("data/scanned_image.png").convert("L"))
+   reference = np.load("data/reference_image.npy")
+
+   recon = DSPReconstructor(cfg)
+   # Run the analysis pipeline
+   metrics = recon.evaluate_restoration_quality(reference, scanned)
+   print(f"PSNR: {metrics['psnr']} dB, MAE: {metrics['mae']}")
+   ```
+3. Execute the script:
+   ```bash
+   PYTHONPATH=. python analyze_scanned.py
+   ```
 3. Check the results in `data/` and `data/analysis_report.txt`.
 
-## Algorithm Overview
-- **Vibration correction**: Per-row sub-pixel centroid detection on a vertical tracker band.
-- **Motion correction**: Hilbert Transform phase-inversion on a vertical chirp column, with PCHIP-smoothed monotonicity for robust Y-axis reconstruction.
-- **Reconstruction**: Sub-pixel horizontal shift correction + keep/drop recipe + 1D interpolation for a perfect reference restaurarion.
+## Industrial Production Specs (Reference)
+This system is optimized for high-resolution industrial line-scan cameras (e.g., 16k sensors) with continuous longitudinal scanning.
+
+| Parameter | Value | Description |
+| :--- | :--- | :--- |
+| **Scan Area** | 20,000 x 16,384 px | Total image real estate (Rows x Columns). |
+| **Tag Location** | Right Margin | The vertical NSSB tag is placed at the right-most edge. |
+| **Tag Dimensions** | 20,000 x **300 px** | Standard **N=2 Golden Ratio Vernier** layout. |
+| **Sensor Overhead** | **1.83%** | Bandwidth consumed by the reconstruction tag. |
+| **Available Scanning** | 16,084 px (98.1%) | Net usable pixels for the central workpiece. |
+
+### Recommended Production Config (N=2)
+- `n_strips`: 2
+- `vernier_frequencies`: [7.0, 11.3] (Base H=1000 scaled linearly to total H)
+- `strip_width`: 50 px
+- `x_tracker`: 50 px
+- `reconstructor`: **DSPReconstructor (Isotonic PAVA + PCHIP)**
+
+For mathematical details, see [4SSB_algorithm.md](./4SSB_algorithm.md).
