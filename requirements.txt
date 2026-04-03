@@ -1,0 +1,6 @@
+numpy
+scipy
+pillow
+# For DTW distortion mode (--mode dtw)
+opencv-python
+fastdtw

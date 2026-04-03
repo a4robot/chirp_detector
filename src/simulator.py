@@ -10,45 +10,69 @@ class MechanicalChaosEngine:
     def __init__(self, config: ScanConfig):
         self.config = config
 
-    def apply_mechanical_distortions(self, input_image: np.ndarray) -> (np.ndarray, list):
-        """Simulate realistic scanning chaos on a perfect reference image."""
+    def apply_mechanical_distortions(self, input_image: np.ndarray,
+                                      rotation_deg: float = 0.0) -> tuple:
+        """Simulate realistic scanning chaos on a perfect reference image.
+
+        Args:
+            input_image:  Grayscale uint8 reference.
+            rotation_deg: Physical camera tilt to simulate (degrees, CCW+).
+                          Applied BEFORE Y/X distortions to correctly mock a
+                          tilted line-scan array.
+        """
+        import cv2
+        
+        # 1. Apply physical rotation (simulates camera tilt) FIRST
+        # Convention: positive rotation_deg = clockwise tilt (matches tag encoding).
+        # cv2.getRotationMatrix2D uses CCW-positive, so we pass -rotation_deg.
+        if abs(rotation_deg) > 1e-4:
+            H, W = input_image.shape
+            cx, cy = W / 2.0, H / 2.0
+            M = cv2.getRotationMatrix2D((cx, cy), -rotation_deg, 1.0)
+            input_image = cv2.warpAffine(
+                input_image, M, (W, H),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REPLICATE
+            )
+            print(f"      Simulated {rotation_deg:+.2f}° CW camera tilt.")
+
         h, w = input_image.shape
         target_length = h + np.random.randint(-50, 50)
 
-        # 1. Compute Error Profiles (Y and X axis)
+        # 2. Compute Error Profiles (Y and X axis)
         motion_profile  = self._compute_motion_error_profile(h, target_length)
         vibration_shift = self._compute_vibration_profile(target_length)
 
-        # 2. Resample Image (Y-axis)
+        # 3. Resample Image (Y-axis)
         sampled_image = np.zeros((target_length, w))
         orig_y = np.arange(h)
         for col in range(w):
             sampled_image[:, col] = np.interp(motion_profile, orig_y, input_image[:, col])
 
-        # 3. Resample Image (X-axis vibration)
+        # 4. Resample Image (X-axis vibration)
         distorted_image = np.zeros((target_length, w), dtype=np.uint8)
         answer_key = []
         orig_x = np.arange(w)
 
         for i in range(target_length):
             shift = float(vibration_shift[i])
-            # Correct the row with sub-pixel shift
             new_x = orig_x - shift
             row = sampled_image[i]
             distorted_image[i] = np.interp(
                 new_x, orig_x, row,
-                left=float(row[0]),    # replicate left edge pixel
-                right=float(row[-1])   # replicate right edge pixel
+                left=float(row[0]),
+                right=float(row[-1])
             ).astype(np.uint8)
 
-            # Record standard truth for validation
             answer_key.append({
                 "distorted_line": i,
                 "source_y_coord": float(motion_profile[i]),
-                "x_shift": shift
+                "x_shift": shift,
+                "rotation_deg": float(rotation_deg)
             })
 
         return distorted_image, answer_key
+
 
     def _compute_motion_error_profile(self, input_height: int, 
                                      target_length: int) -> np.ndarray:
