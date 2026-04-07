@@ -223,12 +223,14 @@ def decode_rotation_angle(image: np.ndarray,
 def build_y_map_from_signal(signal: np.ndarray,
                              f0: float = CHIRP_F0,
                              f1: float = CHIRP_FREQ,
-                             y_shift: float = 0.0) -> np.ndarray:
+                             y_shift: float = 0.0,
+                             ideal_H: int = 20000) -> np.ndarray:
     """Build a PCHIP Y-axis mapping from the winning 1D signal.
 
     y_shift: Physical rotation offsets the tag vertically (e.g., tags on the right
              shift down when the object is rotated CW). Subtract this shift when
              identifying which ideal edge corresponds to the first observed edge.
+    ideal_H: The canonical reference height. This defines the chirp sweep rate.
     """
     H = len(signal)
 
@@ -249,46 +251,44 @@ def build_y_map_from_signal(signal: np.ndarray,
     obs_edges = np.array(obs_edges)
 
     # -- Filter out spurious boundary edges in the padding zone ----------------
-    PAD_PX = 200
-    obs_edges = obs_edges[(obs_edges >= PAD_PX) & (obs_edges <= H - PAD_PX)]
+    PAD_PX = 200 # Padding in ref space? Let's scale it.
+    scale_y_est = H / float(ideal_H)
+    pad_px_scan = PAD_PX * scale_y_est
+    obs_edges = obs_edges[(obs_edges >= pad_px_scan) & (obs_edges <= H - pad_px_scan)]
 
     if len(obs_edges) < 4:
         return np.arange(H, dtype=float)
 
-    # -- Ideal edge positions (full span 0..H-1) --------------------------------
-    t_fine = np.linspace(0, 1, H * 4)
+    # -- Ideal edge positions (full span 0..ideal_H-1) --------------------------
+    # Use ideal_H here, as that's what the original chart printed!
+    t_fine = np.linspace(0, 1, ideal_H * 4)
     k = f1 - f0
     phi_fine = 2.0 * np.pi * (f0 * t_fine + 0.5 * k * t_fine ** 2)
     s_fine = np.sign(np.sin(phi_fine))
     s_fine[s_fine == 0] = 1
     ideal_edges = np.where(np.diff(s_fine) != 0)[0].astype(float) / 4.0
 
-    # -- Align observed edges to ideal by position, correcting for y_shift -----
-    # Filter false cut-off edges at the top boundary
-    while len(obs_edges) > 0:
-        eff_obs = obs_edges[0] - y_shift
-        j0 = int(np.argmin(np.abs(ideal_edges - eff_obs)))
-        if np.abs(ideal_edges[j0] - eff_obs) > 400:
-            obs_edges = obs_edges[1:]
-        else:
-            break
+    # -- Align observed edges to ideal by finding the best fitting offset ------
+    # We search for the starting ideal edge j0 that yields the lowest interval error.
+    best_j0 = 0
+    min_err = 1e12
+    # Search range: the first observed edge (corrected) should be near an ideal edge
+    first_obs_eff = obs_edges[0] / scale_y_est - y_shift / scale_y_est
+    
+    # Simple search around the estimated j0
+    j_est = int(np.argmin(np.abs(ideal_edges - first_obs_eff)))
+    for dj in range(-20, 21):
+        j = j_est + dj
+        if j < 0 or j + len(obs_edges) > len(ideal_edges):
+            continue
+        # Compare intervals (more robust than absolute positions)
+        m = min(len(obs_edges), 10)
+        err = np.sum(np.abs(np.diff(obs_edges[:m]) / scale_y_est - np.diff(ideal_edges[j:j+m])))
+        if err < min_err:
+            min_err = err
+            best_j0 = j
 
-    # Filter false cut-off edges at the bottom boundary
-    while len(obs_edges) > 0:
-        eff_obs = obs_edges[-1] - y_shift
-        j1 = int(np.argmin(np.abs(ideal_edges - eff_obs)))
-        if np.abs(ideal_edges[j1] - eff_obs) > 400:
-            obs_edges = obs_edges[:-1]
-        else:
-            break
-
-    if len(obs_edges) < 4:
-        return np.arange(H, dtype=float)
-
-    first_obs = obs_edges[0]
-    effective_obs = first_obs - y_shift
-    j0 = int(np.argmin(np.abs(ideal_edges - effective_obs)))
-
+    j0 = best_j0
     n = min(len(obs_edges), len(ideal_edges) - j0)
     dist_s  = obs_edges[:n]
     ideal_s = ideal_edges[j0: j0 + n]
@@ -301,29 +301,9 @@ def build_y_map_from_signal(signal: np.ndarray,
     if len(dist_s) < 2:
         return np.arange(H, dtype=float)
 
-    # -- Anchor spline at image boundaries ------------------------------------
-    # To mathematically preserve the geometric rotation before cv2.warpAffine applies,
-    # the mapped ideal_s MUST include the physical rotation offset (y_shift).
-    ideal_s_shifted = ideal_s + y_shift
-    
-    # Rows in the padding zone (no signal) should map to identity.
-    # The physical line scanner starts at row 0 and ends at row H-1, so 
-    # Y_cam(0) = 0 and Y_cam(H-1) = H-1.
-    anchor_0 = 0.0
-    anchor_H = float(H - 1)
-
-    dist_s  = np.concatenate([[0.0],  dist_s,  [float(H - 1)]])
-    ideal_s = np.concatenate([[anchor_0],  ideal_s_shifted, [anchor_H]])
-    
-    _, uniq = np.unique(dist_s, return_index=True)
-    dist_s  = dist_s[uniq]
-    ideal_s = ideal_s[uniq]
-
+    # -- Build spline without forcing anchors to 0 and H-1 ---------------------
+    # This allows the spline to naturally extrapolate so crop offsets remain accurate
     spline = PchipInterpolator(dist_s, ideal_s, extrapolate=True)
-    # Don't strictly clip to H-1 if the rotation geometrically extends beyond it, 
-    # but we can clip loosely or leave it. Actually, the reference image operates 
-    # in [0, H-1]. The geometric derotation will shift it back.
-    # We will let the spline extrapolate naturally, then clip.
     return spline(np.arange(H, dtype=float))
 
 

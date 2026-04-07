@@ -215,9 +215,10 @@ class DSPReconstructor:
 
         # We use the best_signal from dist_img because it was perfectly vertical 
         # there (blurred only by true X-vibration).
-        raw_map = build_y_map_from_signal(best_signal, f0=CHIRP_F0, f1=CHIRP_FREQ, y_shift=y_shift)
-        scale   = (REF_H - 1) / max(1, len(best_signal) - 1)
-        y_map   = np.clip(raw_map * scale, 0, REF_H - 1)
+        raw_map = build_y_map_from_signal(best_signal, f0=CHIRP_F0, f1=CHIRP_FREQ, y_shift=y_shift, ideal_H=REF_H)
+        # Note: raw_map already maps row indices back to reference rows [0, 20000).
+        # We don't need additional global scaling here if build_y_map handles it correctly.
+        y_map = raw_map
 
         return self._mono(y_map)
 
