@@ -15,6 +15,7 @@ Supported formats: PNG, BMP, JPG, TIFF
 import argparse
 import numpy as np
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = None
 
 from src.config import ScanConfig, REST_NPY, REST_PNG, REPORT
 from src.analyzer import DSPReconstructor
@@ -41,6 +42,10 @@ def main():
     parser.add_argument("scan", help="Path to scanned image (PNG/BMP/JPG/TIFF)")
     parser.add_argument("--reference", "-r", default=None,
                         help="Optional reference image for PSNR/MAE evaluation")
+    parser.add_argument("--x", type=int, default=None,
+                        help="Override X-coordinate for chirp analysis (like plot_chirp.py)")
+    parser.add_argument("--width", type=int, default=20,
+                        help="Width of strip for chirp analysis (default: 20)")
     args = parser.parse_args()
 
     cfg = ScanConfig()
@@ -51,13 +56,13 @@ def main():
     scanned = load_grayscale(args.scan)
     print(f"  Shape: {scanned.shape}")
 
-    # ── Step 1: Decode rotation + vertical phase mapping ─────────────────────
-    print("\n[1/2] Restoring vertical phase mapping (rotation tags)...")
-    y_phase = recon.restore_vertical_phase_mapping(scanned)
+    # ── Step 1: Detect horizontal vibration (x-tracker) ──────────────────────
+    print("\n[1/2] Detecting horizontal vibration (x-tracker)...")
+    x_shifts = recon.detect_horizontal_vibration(scanned, None)
 
-    # ── Step 2: Detect horizontal vibration (x-tracker) ──────────────────────
-    print("[2/2] Detecting horizontal vibration (x-tracker)...")
-    x_shifts = recon.detect_horizontal_vibration(scanned, y_phase)
+    # ── Step 2: Decode rotation + vertical phase mapping ─────────────────────
+    print("[2/2] Restoring vertical phase mapping (rotation tags)...")
+    y_phase = recon.restore_vertical_phase_mapping(scanned, override_x=args.x, override_width=args.width)
 
     # ── Reconstruct ──────────────────────────────────────────────────────────
     recipe = recon.generate_reconstruction_recipe(y_phase, x_shifts)
