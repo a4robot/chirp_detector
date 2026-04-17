@@ -220,104 +220,423 @@ def decode_rotation_angle(image: np.ndarray,
     return best_angle, best_signal, best_score
 
 
-def build_y_map_from_signal(signal: np.ndarray,
-                             f0: float = CHIRP_F0,
-                             f1: float = CHIRP_FREQ,
-                             y_shift: float = 0.0,
-                             ideal_H: int = 20000) -> np.ndarray:
-    """Build a PCHIP Y-axis mapping from the winning 1D signal.
 
-    y_shift: Physical rotation offsets the tag vertically (e.g., tags on the right
-             shift down when the object is rotated CW). Subtract this shift when
-             identifying which ideal edge corresponds to the first observed edge.
-    ideal_H: The canonical reference height. This defines the chirp sweep rate.
+TARGET_MATCHED_EDGES: int = 52
+"""Legacy constant kept for backward-compatibility.
+The new typed-edge pipeline (build_y_map_from_signal) derives the target
+dynamically from compute_ideal_edges_typed() — do not rely on this value."""
+
+
+def compute_ideal_edges(f0:      float = CHIRP_F0,
+                        f1:      float = CHIRP_FREQ,
+                        ideal_H: int   = 20000) -> np.ndarray:
+    """Ideal zero-crossing edge positions in [0, ideal_H] coordinate space."""
+    t_fine = np.linspace(0, 1, ideal_H * 4)
+    k      = f1 - f0
+    phi    = 2.0 * np.pi * (f0 * t_fine + 0.5 * k * t_fine ** 2)
+    s      = np.sign(np.sin(phi))
+    s[s == 0] = 1
+    return np.where(np.diff(s) != 0)[0].astype(float) / 4.0
+
+
+def detect_chirp_edges(signal:  np.ndarray,
+                       f0:      float = CHIRP_F0,
+                       f1:      float = CHIRP_FREQ,
+                       ideal_H: int   = 20000,
+                       pad_px:  int   = 200) -> np.ndarray:
     """
-    H = len(signal)
+    Detect sub-pixel zero-crossing edges from a 1-D binary chirp signal.
 
-    # -- Detect observed edges ------------------------------------------------
-    centered = signal.astype(float) - 127.5
-    signs = np.sign(centered)
+    Edges are filtered to the valid strip band (after top/bottom padding)
+    and noise-rejected via a minimum-interval gate.
+    """
+    H       = len(signal)
+    scale_y = H / float(ideal_H)
+
+    centered  = signal.astype(float) - 127.5
+    signs     = np.sign(centered)
     signs[signs == 0] = 1
     cross_idx = np.where(np.diff(signs) != 0)[0]
+    if len(cross_idx) == 0:
+        return np.array([])
 
-    if len(cross_idx) < 4:
-        return np.arange(H, dtype=float)
-
-    obs_edges = []
+    obs = []
     for i in cross_idx:
         a, b = centered[i], centered[i + 1]
         frac = -a / (b - a) if (b - a) != 0 else 0.5
-        obs_edges.append(i + frac)
-    obs_edges = np.array(obs_edges)
+        obs.append(i + frac)
+    obs = np.array(obs)
 
-    # -- Filter out spurious boundary edges in the padding zone ----------------
-    PAD_PX = 200 # Padding in ref space? Let's scale it.
-    scale_y_est = H / float(ideal_H)
-    pad_px_scan = PAD_PX * scale_y_est
-    obs_edges = obs_edges[(obs_edges >= pad_px_scan) & (obs_edges <= H - pad_px_scan)]
+    # Valid row window from the ideal first edge
+    ideal_all       = compute_ideal_edges(f0, f1, ideal_H)
+    first_chirp_ref = ideal_all[0] if len(ideal_all) > 0 else 0.0
+    floor_px        = first_chirp_ref * scale_y * 0.90
+    ceil_px         = (ideal_H - pad_px) * scale_y
+    obs = obs[(obs >= floor_px) & (obs <= ceil_px)]
 
-    if len(obs_edges) < 4:
-        return np.arange(H, dtype=float)
+    # Minimum-interval filter (reject sub-half-period glitches)
+    min_half_ref = ideal_H / (2.0 * f1)
+    min_interval = max(30.0, min_half_ref * scale_y * 0.80)
+    if len(obs) > 1:
+        kept = [obs[0]]
+        for e in obs[1:]:
+            if e - kept[-1] >= min_interval:
+                kept.append(e)
+        obs = np.array(kept)
 
-    # -- Ideal edge positions (full span 0..ideal_H-1) --------------------------
-    # Use ideal_H here, as that's what the original chart printed!
-    t_fine = np.linspace(0, 1, ideal_H * 4)
-    k = f1 - f0
-    phi_fine = 2.0 * np.pi * (f0 * t_fine + 0.5 * k * t_fine ** 2)
-    s_fine = np.sign(np.sin(phi_fine))
-    s_fine[s_fine == 0] = 1
-    ideal_edges = np.where(np.diff(s_fine) != 0)[0].astype(float) / 4.0
+    return obs
 
-    # -- Align observed edges to ideal by finding the best fitting offset ------
-    # We search for the starting ideal edge j0 that yields the lowest interval error.
-    best_j0 = 0
-    min_err = 1e12
-    # Search range: the first observed edge (corrected) should be near an ideal edge
-    first_obs_eff = obs_edges[0] / scale_y_est - y_shift / scale_y_est
-    
-    # Simple search around the estimated j0
-    j_est = int(np.argmin(np.abs(ideal_edges - first_obs_eff)))
-    for dj in range(-20, 21):
-        j = j_est + dj
-        if j < 0 or j + len(obs_edges) > len(ideal_edges):
+
+def _try_match(obs_edges:   np.ndarray,
+               ideal_edges: np.ndarray,
+               scale_y:     float,
+               j0:          int,
+               tolerance:   float) -> Tuple[int, list, list]:
+    """Single greedy one-to-one matching pass with given (j0, tolerance)."""
+    dist_list  = []
+    ideal_list = []
+    obs_ptr    = 0
+
+    for ji in range(j0, min(j0 + len(obs_edges) + 10, len(ideal_edges))):
+        if obs_ptr >= len(obs_edges):
+            break
+        ideal_pos    = ideal_edges[ji] * scale_y
+        obs_pos      = obs_edges[obs_ptr]
+        exp_interval = (ideal_edges[ji] - ideal_edges[ji - 1]) * scale_y if ji > 0 else 500.0 * scale_y
+        tol_px       = max(exp_interval * tolerance, 50.0)
+
+        if abs(obs_pos - ideal_pos) <= tol_px:
+            dist_list.append(obs_pos)
+            ideal_list.append(ideal_edges[ji])
+            obs_ptr += 1
+        else:
+            # Try skipping one obs edge (handles a single noise spike)
+            if obs_ptr + 1 < len(obs_edges):
+                next_obs = obs_edges[obs_ptr + 1]
+                if abs(next_obs - ideal_pos) < abs(obs_pos - ideal_pos):
+                    obs_ptr += 1
+                    if abs(obs_edges[obs_ptr] - ideal_pos) <= tol_px:
+                        dist_list.append(obs_edges[obs_ptr])
+                        ideal_list.append(ideal_edges[ji])
+                        obs_ptr += 1
+
+    return len(dist_list), dist_list, ideal_list
+
+
+def iterative_edge_match(obs_edges:   np.ndarray,
+                          ideal_edges: np.ndarray,
+                          scale_y:     float,
+                          target_n:    int   = TARGET_MATCHED_EDGES,
+                          y_shift:     float = 0.0) -> Tuple[np.ndarray, np.ndarray, int, float, bool]:
+    """
+    Search (j0 × tolerance) until exactly *target_n* edges are matched.
+
+    Sweeps j0 = j_est ± 30, tolerance ∈ [0.20, 0.60] step 0.05.
+    Returns the first combination that hits exactly target_n.
+    Returns success=False (no exception) if target cannot be met.
+
+    Returns
+    -------
+    (dist_s, ideal_s, best_j0, best_tol, success)
+    """
+    if len(obs_edges) == 0:
+        return np.array([]), np.array([]), 0, 0.0, False
+
+    first_obs_eff = obs_edges[0] / scale_y - y_shift / max(scale_y, 1e-9)
+    j_est         = max(0, int(np.argmin(np.abs(ideal_edges - first_obs_eff))))
+
+    tolerances  = np.round(np.arange(0.20, 0.61, 0.05), 2).tolist()
+    best_cnt    = 0
+
+    for dj in range(-30, 31):
+        j0 = j_est + dj
+        if j0 < 0 or j0 + target_n > len(ideal_edges):
             continue
-        # Compare intervals (more robust than absolute positions)
-        m = min(len(obs_edges), 10)
-        err = np.sum(np.abs(np.diff(obs_edges[:m]) / scale_y_est - np.diff(ideal_edges[j:j+m])))
-        if err < min_err:
-            min_err = err
-            best_j0 = j
+        for tol in tolerances:
+            count, dist_list, ideal_list = _try_match(obs_edges, ideal_edges, scale_y, j0, tol)
+            if count == target_n:
+                dist_s  = np.array(dist_list)
+                ideal_s = np.array(ideal_list)
+                _, uniq = np.unique(dist_s, return_index=True)
+                dist_s, ideal_s = dist_s[uniq], ideal_s[uniq]
+                print(f"      [Y-map] Iterative match: j0={j0}, tol={tol:.2f} → {count}/{target_n} ✓")
+                return dist_s, ideal_s, j0, tol, True
+            if count > best_cnt:
+                best_cnt = count
 
-    j0 = best_j0
-    n = min(len(obs_edges), len(ideal_edges) - j0)
-    dist_s  = obs_edges[:n]
-    ideal_s = ideal_edges[j0: j0 + n]
+    print(f"      [Y-map] ABORT — target={target_n} unreachable. best_so_far={best_cnt}, obs={len(obs_edges)}")
+    return np.array([]), np.array([]), j_est, 0.0, False
 
-    # Clean duplicates
-    _, uniq = np.unique(dist_s, return_index=True)
-    dist_s  = dist_s[uniq]
-    ideal_s = ideal_s[uniq]
 
+def build_spline_map(dist_s:  np.ndarray,
+                     ideal_s: np.ndarray,
+                     H:       int,
+                     ideal_H: int) -> np.ndarray:
+    """
+    Build a PCHIP spline Y-map from matched (distorted-row, ideal-row) pairs.
+    Boundary anchors are extrapolated from the slope at each end.
+    """
     if len(dist_s) < 2:
         return np.arange(H, dtype=float)
 
-    # -- Build spline without forcing anchors to 0 and H-1 ---------------------
-    # This allows the spline to naturally extrapolate so crop offsets remain accurate
-    spline = PchipInterpolator(dist_s, ideal_s, extrapolate=True)
-    return spline(np.arange(H, dtype=float))
+    slope_s = (ideal_s[1]  - ideal_s[0])  / max(dist_s[1]  - dist_s[0],  1.0)
+    slope_e = (ideal_s[-1] - ideal_s[-2]) / max(dist_s[-1] - dist_s[-2], 1.0)
+    ev_s    = max(0.0,             float(ideal_s[0]  - slope_s * dist_s[0]))
+    ev_e    = min(float(ideal_H - 1), float(ideal_s[-1] + slope_e * (H - 1 - dist_s[-1])))
+
+    dist_ext  = np.concatenate([[0.0],   dist_s,  [float(H - 1)]])
+    ideal_ext = np.concatenate([[ev_s],  ideal_s, [ev_e]])
+
+    spline  = PchipInterpolator(dist_ext, ideal_ext, extrapolate=False)
+    raw_map = spline(np.arange(H, dtype=float))
+    return np.clip(raw_map, 0.0, float(ideal_H - 1))
+
+
+def compute_ideal_edges_typed(f0:      float = CHIRP_F0,
+                               f1:      float = CHIRP_FREQ,
+                               ideal_H: int   = 20000,
+                               pad_px:  int   = 200
+                               ) -> Tuple[np.ndarray, np.ndarray]:
+    """Ideal chirp edges filtered to the drawn strip [pad_px, ideal_H-pad_px-1].
+
+    Includes the virtual strip-start rising edge when the chirp opens HIGH at
+    pad_px (the blank-to-chirp boundary is a real, observable rising edge).
+
+    Returns
+    -------
+    positions : np.ndarray  — row positions in reference space
+    types     : np.ndarray  — +1 rising (LOW→HIGH),  -1 falling (HIGH→LOW)
+    """
+    t_fine = np.linspace(0, 1, ideal_H * 4)
+    k      = f1 - f0
+    phi    = 2.0 * np.pi * (f0 * t_fine + 0.5 * k * t_fine ** 2)
+    s      = np.sign(np.sin(phi))
+    s[s == 0] = 1
+    diff_s     = np.diff(s)
+    cross_idx  = np.where(diff_s != 0)[0]
+
+    positions  = cross_idx.astype(float) / 4.0
+    types      = np.sign(diff_s[cross_idx]).astype(int)   # +1 rising, -1 falling
+
+    # Filter to physically drawn strip rows
+    strip_start = float(pad_px)
+    strip_end   = float(ideal_H - pad_px - 1)
+    mask        = (positions >= strip_start) & (positions <= strip_end)
+    positions   = positions[mask]
+    types       = types[mask]
+
+    # Virtual start: chirp opens HIGH at pad_px → blank→chirp is a rising edge
+    t_s   = pad_px / float(ideal_H)
+    phi_s = 2.0 * np.pi * (f0 * t_s + 0.5 * k * t_s ** 2)
+    if np.sin(phi_s) >= 0:
+        positions = np.concatenate([[strip_start], positions])
+        types     = np.concatenate([[+1],          types])
+
+    return positions, types
+
+
+def detect_chirp_edges_typed(signal:  np.ndarray,
+                              f0:      float = CHIRP_F0,
+                              f1:      float = CHIRP_FREQ,
+                              ideal_H: int   = 20000,
+                              pad_px:  int   = 200) -> Tuple[np.ndarray, np.ndarray]:
+    """Detect typed sub-pixel zero-crossing edges from a 1-D binary chirp signal.
+
+    Sets floor_px one row before the strip start so the blank→chirp rising edge
+    is naturally captured rather than filtered away (the old floor_px=1346 cut
+    it out, leaving the count odd and causing cascade matching errors).
+
+    Returns
+    -------
+    positions : np.ndarray  — edge positions in scan space
+    types     : np.ndarray  — +1 rising, -1 falling
+    """
+    H       = len(signal)
+    scale_y = H / float(ideal_H)
+
+    centered   = signal.astype(float) - 127.5
+    signs      = np.sign(centered)
+    signs[signs == 0] = 1
+    diff_signs = np.diff(signs)
+    cross_idx  = np.where(diff_signs != 0)[0]
+
+    if len(cross_idx) == 0:
+        return np.array([]), np.array([], dtype=int)
+
+    obs, obs_t = [], []
+    for i in cross_idx:
+        a, b = centered[i], centered[i + 1]
+        frac = -a / (b - a) if (b - a) != 0 else 0.5
+        obs.append(i + frac)
+        obs_t.append(int(np.sign(diff_signs[i])))
+    obs   = np.array(obs)
+    obs_t = np.array(obs_t, dtype=int)
+
+    # Expand floor/ceil by 500px to account for distortion drift near boundaries
+    floor_px = max(0.0, (pad_px - 500) * scale_y)
+    ceil_px  = (ideal_H - pad_px + 500) * scale_y
+    mask     = (obs >= floor_px) & (obs <= ceil_px)
+    obs, obs_t = obs[mask], obs_t[mask]
+
+    # Minimum-interval noise filter
+    min_half_ref = ideal_H / (2.0 * f1)
+    min_interval = max(30.0, min_half_ref * scale_y * 0.80)
+    if len(obs) > 1:
+        kept, kept_t = [obs[0]], [obs_t[0]]
+        for e, et in zip(obs[1:], obs_t[1:]):
+            if e - kept[-1] >= min_interval:
+                kept.append(e)
+                kept_t.append(et)
+        obs, obs_t = np.array(kept), np.array(kept_t, dtype=int)
+
+    return obs, obs_t
+
+
+def _match_typed_subseq(obs:       np.ndarray,
+                         ideal:     np.ndarray,
+                         scale_y:   float,
+                         tolerance: float = 0.40) -> Tuple[np.ndarray, np.ndarray]:
+    """Index-based match for a single edge type (all-rising or all-falling).
+
+    The distortion is a *nonlinear* row mapping, so matching by position error
+    is fundamentally wrong — an obs edge at row 2400 may legitimately correspond
+    to ideal row 2540 because the scan stretched or skipped rows in between.
+
+    Correct approach: the i-th observed edge of a given type must correspond to
+    the (j0 + i)-th ideal edge of that type, where j0 is the starting offset.
+    We estimate j0 from the first obs edge (linear approximation is good enough
+    for a small offset search) then match the rest purely by index.
+
+    Returns (matched_obs_scan, matched_ideal_ref).
+    """
+    if len(obs) == 0 or len(ideal) == 0:
+        return np.array([]), np.array([])
+
+    ideal_scan = ideal * scale_y
+    j_est      = max(0, int(np.argmin(np.abs(ideal_scan - obs[0]))))
+
+    best_n, best_dist, best_ideal_m = 0, np.array([]), np.array([])
+
+    for dj in range(-3, 4):
+        j0 = j_est + dj
+        if j0 < 0:
+            continue
+        n = min(len(obs), len(ideal) - j0)
+        if n <= 0:
+            continue
+        if n > best_n:
+            best_n       = n
+            best_dist    = obs[:n].copy()
+            best_ideal_m = ideal[j0: j0 + n].copy()
+
+    return best_dist, best_ideal_m
+
+
+
+def typed_edge_match(obs_pos:     np.ndarray,
+                     obs_types:   np.ndarray,
+                     ideal_pos:   np.ndarray,
+                     ideal_types: np.ndarray,
+                     scale_y:     float,
+                     tolerance:   float = 0.40) -> Tuple[np.ndarray, np.ndarray, bool]:
+    """Match chirp edges with strict type separation: RISING→RISING, FALLING→FALLING.
+
+    Returns
+    -------
+    dist_s  : matched observed positions (scan space), sorted
+    ideal_s : matched ideal positions (reference space), sorted
+    success : True when both rising and falling have ≥2 matched pairs
+    """
+    obs_r, obs_f     = obs_pos[obs_types == +1],   obs_pos[obs_types == -1]
+    ideal_r, ideal_f = ideal_pos[ideal_types == +1], ideal_pos[ideal_types == -1]
+
+    dist_r,  ideal_r_m = _match_typed_subseq(obs_r, ideal_r, scale_y, tolerance)
+    dist_f,  ideal_f_m = _match_typed_subseq(obs_f, ideal_f, scale_y, tolerance)
+
+    print(f"      [Y-map typed] rising {len(dist_r)}/{len(ideal_r)}  "
+          f"falling {len(dist_f)}/{len(ideal_f)}")
+
+    if len(dist_r) < 2 and len(dist_f) < 2:
+        return np.array([]), np.array([]), False
+
+    dist_s  = np.concatenate([dist_r,  dist_f])
+    ideal_s = np.concatenate([ideal_r_m, ideal_f_m])
+    order   = np.argsort(dist_s)
+    dist_s, ideal_s = dist_s[order], ideal_s[order]
+
+    _, uniq = np.unique(dist_s, return_index=True)
+    dist_s, ideal_s = dist_s[uniq], ideal_s[uniq]
+
+    return dist_s, ideal_s, (len(dist_r) >= 2 and len(dist_f) >= 2)
+
+
+def build_y_map_from_signal(signal:        np.ndarray,
+                             f0:           float = CHIRP_F0,
+                             f1:           float = CHIRP_FREQ,
+                             y_shift:      float = 0.0,
+                             ideal_H:      int   = 20000,
+                             reverse_chirp: bool = False,
+                             target_n:     int   = TARGET_MATCHED_EDGES) -> np.ndarray:
+    """Build a PCHIP Y-axis mapping using type-separated rising/falling edge matching.
+
+    Parameters
+    ----------
+    signal        : 1-D uint8 chirp strip signal from the distorted scan.
+    f0 / f1       : Chirp start / end frequency (must match synthesis).
+    y_shift       : Unused in typed pipeline (kept for API compatibility).
+    ideal_H       : Canonical reference height.
+    reverse_chirp : True when the target was scanned with a vertical flip.
+    target_n      : Ignored — typed pipeline derives count from design parameters.
+
+    Raises
+    ------
+    ValueError
+        If typed matching cannot produce ≥2 pairs per edge type.
+        Callers must catch and abort reconstruction — do not proceed.
+    """
+    H           = len(signal)
+    work_signal = signal[::-1].copy() if reverse_chirp else signal
+    scale_y     = H / float(ideal_H)
+
+    obs_pos,   obs_types   = detect_chirp_edges_typed(work_signal, f0=f0, f1=f1, ideal_H=ideal_H)
+    ideal_pos, ideal_types = compute_ideal_edges_typed(f0=f0, f1=f1, ideal_H=ideal_H)
+
+    n_r_ideal = int(np.sum(ideal_types == +1))
+    n_f_ideal = int(np.sum(ideal_types == -1))
+    n_r_obs   = int(np.sum(obs_types   == +1))
+    n_f_obs   = int(np.sum(obs_types   == -1))
+    print(f"      [Y-map typed] obs R={n_r_obs} F={n_f_obs}  "
+          f"ideal R={n_r_ideal} F={n_f_ideal}  total_ideal={len(ideal_pos)}")
+
+    dist_s, ideal_s, success = typed_edge_match(
+        obs_pos, obs_types, ideal_pos, ideal_types, scale_y
+    )
+
+    if not success:
+        raise ValueError(
+            f"[Y-map] Typed match failed — insufficient pairs. "
+            f"obs R={n_r_obs} F={n_f_obs}. Reconstruction aborted."
+        )
+
+    raw_map = build_spline_map(dist_s, ideal_s, H, ideal_H)
+
+    if reverse_chirp:
+        raw_map_flip = np.empty_like(raw_map)
+        for i in range(H):
+            raw_map_flip[i] = (ideal_H - 1) - raw_map[H - 1 - i]
+        return raw_map_flip
+
+    return raw_map
 
 
 # ── Quick self-test ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import cv2
     print("=== Rotation Tag Self-Test ===")
     print(f"  Total strips : {len(ALL_ANGLES)}")
-    
+
     H, W = 1000, TOTAL_TAG_WIDTH + 100
-    img = np.zeros((H, W), dtype=np.uint8)
-    
-    # FIX: Explicitly set right_x0 so it fits within W
-    # We'll place it right after the left tag + some padding
     layout = build_layout(left_x0=0, right_x0=TOTAL_LEFT_WIDTH + 50) 
     
     img = synthesize_rotation_tag(img, layout)
