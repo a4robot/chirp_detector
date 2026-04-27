@@ -56,6 +56,33 @@ class ScanConfig:
         # Target calibration image size is set for 457mm target width
         self.width = 14975
 
+    def scale(self, factor: float) -> "ScanConfig":
+        """
+        Returns a new ScanConfig instance with all horizontal/vertical pixel parameters 
+        scaled by the given factor.
+        """
+        from copy import deepcopy
+        scaled = deepcopy(self)
+        scaled.width = int(round(self.width * factor))
+        scaled.height = int(round(self.height * factor))
+        
+        scaled.col1_start = int(round(self.col1_start * factor))
+        scaled.col1_end = int(round(self.col1_end * factor))
+        scaled.x_line_start = int(round(self.x_line_start * factor))
+        scaled.x_line_end = int(round(self.x_line_end * factor))
+        scaled.x_tracker_expected_center = self.x_tracker_expected_center * factor
+        
+        scaled.strip_width = int(round(self.strip_width * factor))
+        scaled.gap_width = int(round(self.gap_width * factor))
+        scaled.first_gap = int(round(self.first_gap * factor))
+        
+        # Re-run post_init to regenerate the staggered strips with scaled widths/gaps
+        scaled.__post_init__()
+        # Override the width to the scaled width since post_init hardcodes it
+        scaled.width = int(round(self.width * factor))
+        
+        return scaled
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Path Management
 # ─────────────────────────────────────────────────────────────────────────────

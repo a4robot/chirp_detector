@@ -55,7 +55,7 @@ from typing import List, Tuple
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-MAX_ANGLE_DEG: float = 2.0          # ±2° coverage
+MAX_ANGLE_DEG: float = 1.0          # ±1° coverage
 ANGLE_STEP_DEG: float = 0.1         # 0.1° resolution
 STRIP_WIDTH_PX: int  = 20           # widened to tolerate lateral vibration + geometric cross-talk
 CHIRP_FREQ: float    = 50.0         # best single-strip frequency (prior benchmarks)
@@ -69,12 +69,22 @@ _RIGHT_ANGLES: List[float] = [round(-i * ANGLE_STEP_DEG, 2)
 
 ALL_ANGLES: List[float] = _LEFT_ANGLES + _RIGHT_ANGLES   # 41 strips total
 
-STRIP_SPACING_PX: int = 20
-TOTAL_LEFT_WIDTH:  int = (len(_LEFT_ANGLES)  * STRIP_WIDTH_PX) + ((len(_LEFT_ANGLES) - 1)  * STRIP_SPACING_PX)
-TOTAL_RIGHT_WIDTH: int = (len(_RIGHT_ANGLES) * STRIP_WIDTH_PX) + ((len(_RIGHT_ANGLES) - 1) * STRIP_SPACING_PX)
+STRIP_SPACING_PX: int = 50
+
+def get_total_left_width(scale_factor: float = 1.0) -> int:
+    sw = int(round(STRIP_WIDTH_PX * scale_factor))
+    ss = int(round(STRIP_SPACING_PX * scale_factor))
+    return (len(_LEFT_ANGLES) * sw) + ((len(_LEFT_ANGLES) - 1) * ss)
+
+def get_total_right_width(scale_factor: float = 1.0) -> int:
+    sw = int(round(STRIP_WIDTH_PX * scale_factor))
+    ss = int(round(STRIP_SPACING_PX * scale_factor))
+    return (len(_RIGHT_ANGLES) * sw) + ((len(_RIGHT_ANGLES) - 1) * ss)
+
+TOTAL_LEFT_WIDTH:  int = get_total_left_width(1.0)
+TOTAL_RIGHT_WIDTH: int = get_total_right_width(1.0)
 TOTAL_TAG_WIDTH:   int = TOTAL_LEFT_WIDTH + TOTAL_RIGHT_WIDTH
         
-
 
 # ── Layout descriptor ─────────────────────────────────────────────────────────
 
@@ -96,7 +106,7 @@ class RotationTagLayout:
         return TOTAL_TAG_WIDTH
 
 
-def build_layout(left_x0: int = 0, right_x0: int = 16000) -> RotationTagLayout:
+def build_layout(left_x0: int = 0, right_x0: int = 16000, scale_factor: float = 1.0) -> RotationTagLayout:
     """
     Build the strip layout:
       - 0° to +2.0° on the left starting at *left_x0*.
@@ -104,17 +114,20 @@ def build_layout(left_x0: int = 0, right_x0: int = 16000) -> RotationTagLayout:
     """
     layout = RotationTagLayout(left_x0=left_x0)
     
+    sw = int(round(STRIP_WIDTH_PX * scale_factor))
+    ss = int(round(STRIP_SPACING_PX * scale_factor))
+
     # Left tag: 0 to +2.0
     x = left_x0
     for angle in _LEFT_ANGLES:
-        layout.strips.append((x, x + STRIP_WIDTH_PX, angle))
-        x += STRIP_WIDTH_PX + STRIP_SPACING_PX
+        layout.strips.append((x, x + sw, angle))
+        x += sw + ss
         
     # Right tag: -0.1 to -2.0
     x = right_x0
     for angle in _RIGHT_ANGLES:
-        layout.strips.append((x, x + STRIP_WIDTH_PX, angle))
-        x += STRIP_WIDTH_PX + STRIP_SPACING_PX
+        layout.strips.append((x, x + sw, angle))
+        x += sw + ss
         
     return layout
 
@@ -420,7 +433,8 @@ def compute_ideal_edges_typed(f0:      float = CHIRP_F0,
 
     # Filter to physically drawn strip rows
     strip_start = float(pad_px)
-    strip_end   = float(ideal_H - pad_px - 1)
+    # Use -2 to safely exclude zero-crossings that land exactly on the discrete clip boundary
+    strip_end   = float(ideal_H - pad_px - 2)
     mask        = (positions >= strip_start) & (positions <= strip_end)
     positions   = positions[mask]
     types       = types[mask]
@@ -576,7 +590,8 @@ def build_y_map_from_signal(signal:        np.ndarray,
                              y_shift:      float = 0.0,
                              ideal_H:      int   = 20000,
                              reverse_chirp: bool = False,
-                             target_n:     int   = TARGET_MATCHED_EDGES) -> np.ndarray:
+                             target_n:     int   = TARGET_MATCHED_EDGES,
+                             pad_px:       int   = 200) -> np.ndarray:
     """Build a PCHIP Y-axis mapping using type-separated rising/falling edge matching.
 
     Parameters
@@ -587,6 +602,7 @@ def build_y_map_from_signal(signal:        np.ndarray,
     ideal_H       : Canonical reference height.
     reverse_chirp : True when the target was scanned with a vertical flip.
     target_n      : Ignored — typed pipeline derives count from design parameters.
+    pad_px        : Dynamic padding for physical unscaled pixels to match geometry.
 
     Raises
     ------
@@ -598,8 +614,8 @@ def build_y_map_from_signal(signal:        np.ndarray,
     work_signal = signal[::-1].copy() if reverse_chirp else signal
     scale_y     = H / float(ideal_H)
 
-    obs_pos,   obs_types   = detect_chirp_edges_typed(work_signal, f0=f0, f1=f1, ideal_H=ideal_H)
-    ideal_pos, ideal_types = compute_ideal_edges_typed(f0=f0, f1=f1, ideal_H=ideal_H)
+    obs_pos,   obs_types   = detect_chirp_edges_typed(work_signal, f0=f0, f1=f1, ideal_H=ideal_H, pad_px=pad_px)
+    ideal_pos, ideal_types = compute_ideal_edges_typed(f0=f0, f1=f1, ideal_H=ideal_H, pad_px=pad_px)
 
     n_r_ideal = int(np.sum(ideal_types == +1))
     n_f_ideal = int(np.sum(ideal_types == -1))
