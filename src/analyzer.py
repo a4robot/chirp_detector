@@ -16,7 +16,7 @@ from scipy.ndimage import median_filter
 import cv2
 import json, os, math
 
-from src.config import (ScanConfig,
+from src.config import (ScanConfig, DESIGN_WIDTH_PX,
                         DIST_NPY, REF_NPY, REST_NPY, REST_PNG,
                         RECIPE, DIFF_PNG, REPORT)
 from src.rotation_tag import (build_layout, decode_rotation_angle,
@@ -26,8 +26,20 @@ from src.rotation_tag import (build_layout, decode_rotation_angle,
 
 class DSPReconstructor:
 
-    def __init__(self, config: ScanConfig):
+    def __init__(self, config: ScanConfig, rotation_decode_method: str = 'variance'):
+        """
+        Parameters
+        ----------
+        config
+            ScanConfig describing the layout (canonical or pre-scaled).
+        rotation_decode_method
+            Strategy passed to RotationAngleDecoder.decode(...).
+            Currently 'variance' (default, legacy behaviour) or
+            'slope_consensus'. Can be overridden after construction by
+            assigning to ``self.rotation_decode_method``.
+        """
         self.cfg = config
+        self.rotation_decode_method = rotation_decode_method
 
     def _pava(self, x):
         """
@@ -119,13 +131,27 @@ class DSPReconstructor:
         
         res = cv2.matchTemplate(profile_2d, template.reshape(1, -1), cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(res)
-        
-        if max_val > 0.5:
-            center_offset = cfg.x_tracker_expected_center - cfg.col1_start
-            x_center0 = max_loc[0] + center_offset
+
+        # Geometric prior: the X-Tracker sits at x_tracker_expected_center, offset
+        # only by global_x_shift (set by the rotation-tag alignment step). The
+        # rotation-tag strips share a [black, white, black] signature with the
+        # tracker, so matchTemplate can lock onto the LEFT tag region with score
+        # 1.0 — particularly under non-canonical scaling. Reject any candidate
+        # that falls implausibly far from the geometric prior and fall back.
+        geom_x        = cfg.x_tracker_expected_center + global_x_shift
+        center_offset = cfg.x_tracker_expected_center - cfg.col1_start
+        candidate_x   = max_loc[0] + center_offset
+        max_drift     = max(bw * 8, 200)
+
+        if max_val > 0.5 and abs(candidate_x - geom_x) <= max_drift:
+            x_center0 = candidate_x
             print(f"      X-Tracker anchor dynamically found at x={x_center0:.1f} (match={max_val:.2f})")
+        elif max_val > 0.5:
+            x_center0 = geom_x
+            print(f"      X-Tracker dynamic anchor rejected (x={candidate_x:.1f} far from geom={geom_x:.1f}); "
+                  f"using geometry anchor x={x_center0:.1f}")
         else:
-            x_center0 = cfg.x_tracker_expected_center + global_x_shift
+            x_center0 = geom_x
             print(f"      X-Tracker search failed (match={max_val:.2f}), using geometry anchor x={x_center0:.1f}")
 
         tan_theta  = math.tan(theta_rad)
@@ -308,23 +334,32 @@ class DSPReconstructor:
     # ── Step 2: Vertical phase mapping via Rotation-Tag ladder ────────────────
 
     def restore_vertical_phase_mapping(self, dist_img: np.ndarray, override_x: int = None, override_width: int = None, flip_vertical: bool = False, known_angle_deg: float = None) -> np.ndarray:
-        
+
         # ── Dynamic Scale Factor ──
-        # Assume original design was 14975 px wide. Detect current scale.
-        scale_factor = dist_img.shape[1] / 14975.0
-        if abs(scale_factor - 1.0) > 1e-3:
+        # Detect current scale relative to the canonical design width. Guard against
+        # double-application: if cfg.width already matches the image, the cfg has
+        # already been scaled (e.g. by a prior call) and we keep scale_factor=1.0.
+        scale_factor = dist_img.shape[1] / float(DESIGN_WIDTH_PX)
+        if abs(scale_factor - 1.0) > 1e-3 and self.cfg.width != dist_img.shape[1]:
             print(f"  Detected image width {dist_img.shape[1]}px. Scaling geometry by factor: {scale_factor:.4f}")
             self.cfg = self.cfg.scale(scale_factor)
-            
+
         cfg   = self.cfg
         REF_H = cfg.height
         print("  Decoding physical rotation angle...")
         from src.rotation_tag import build_layout, get_total_right_width, decode_rotation_angle, build_y_map_from_signal, CHIRP_F0, CHIRP_FREQ
-        
-        # Build layout with scaled factor
-        layout = build_layout(left_x0=int(round(200 * scale_factor)), 
-                              right_x0=cfg.width - get_total_right_width(scale_factor) - int(round(350 * scale_factor)) - int(round(200 * scale_factor)),
-                              scale_factor=scale_factor)
+
+        # Layout build args — derived once, reused for both the alignment layout
+        # and the unshifted reference layout used by the known-angle code path.
+        left_pad_px  = int(round(200 * scale_factor))
+        right_pad_px = int(round(350 * scale_factor)) + int(round(200 * scale_factor))
+        layout_kwargs = dict(
+            left_x0=left_pad_px,
+            right_x0=cfg.width - get_total_right_width(scale_factor) - right_pad_px,
+            scale_factor=scale_factor,
+        )
+
+        layout = build_layout(**layout_kwargs)
 
         # Dynamically align layout to physical scan using cv2 matchTemplate
         import cv2
@@ -373,20 +408,29 @@ class DSPReconstructor:
                 layout.strips[idx] = (cs + shift, ce + shift, ad)
 
         # Save original (unshifted) layout for later reference
-        orig_layout = build_layout(left_x0=int(round(200 * scale_factor)), 
-                                   right_x0=cfg.width - get_total_right_width(scale_factor) - int(round(350 * scale_factor)) - int(round(200 * scale_factor)),
-                                   scale_factor=scale_factor)
+        orig_layout = build_layout(**layout_kwargs)
 
         if known_angle_deg is not None:
-            # Bypass variance-based decode — use caller-supplied angle directly.
+            # Bypass decode — use caller-supplied angle directly.
             angle = known_angle_deg
+            fine_angle = known_angle_deg
             score = 0.0
-            print(f"      Rotation tag decode: angle={angle:+.2f}° (caller-supplied, skipping variance decode)")
+            print(f"      Rotation tag decode: angle={angle:+.2f}° (caller-supplied, skipping decode)")
         else:
-            angle, best_signal, score = decode_rotation_angle(
-                dist_img, layout, verbose=False
+            from src.rotation_tag import RotationAngleDecoder
+            xt_col = cfg.x_tracker_expected_center + getattr(self, 'global_x_shift', 0)
+            decoder = RotationAngleDecoder(layout, x_tracker_col=xt_col)
+            angle, best_signal, score = decoder.decode(
+                dist_img, method=self.rotation_decode_method, verbose=False
             )
-            print(f"      Rotation tag decode: angle={angle:+.2f}°  var={score:.0f}")
+            # Sub-step (continuous) angle, when the strategy provides one.
+            # Used below to compute strip-drift in the chirp signal extraction.
+            fine_angle = decoder.last_fine_angle if decoder.last_fine_angle is not None else angle
+            spread = decoder.last_spread_deg
+            spread_str = f"  spread={spread:.3f}°" if spread is not None else ""
+            print(f"      Rotation tag decode [{self.rotation_decode_method}]: "
+                  f"angle={angle:+.2f}°  fine={fine_angle:+.3f}°  "
+                  f"score={score:.2f}{spread_str}")
 
         # ── 2b: Remove physical tilt from Y-map calculation ───────────────────
         self.physical_cw_deg = -angle
@@ -438,7 +482,9 @@ class DSPReconstructor:
                     # Drift rate: -2*sin(angle) per row
                     # Factor of 2: rotation moves the painted strip position by -sin(angle)/row,
                     # and the strip's own diagonal adds another -sin(angle)/row → -2*sin(angle) total.
-                    sin_a = math.sin(math.radians(angle))
+                    # Use the sub-step `fine_angle` when the decoder provides one (slope_consensus);
+                    # falls back to the snapped ladder step under variance.
+                    sin_a = math.sin(math.radians(fine_angle))
                     rows_idx = np.arange(H_img)
                     col_offsets = np.round(-2.0 * sin_a * (rows_idx - cy_img)).astype(int)
                     c0s = np.clip(cs_base + col_offsets, 0, W_img - 1)
@@ -454,7 +500,7 @@ class DSPReconstructor:
 
         raw_map = build_y_map_from_signal(best_signal, f0=CHIRP_F0, f1=CHIRP_FREQ,
                                            y_shift=y_shift, ideal_H=REF_H,
-                                           pad_px=int(round(200 * getattr(self, '_last_scale_factor', scale_factor))),
+                                           pad_px=int(round(200 * scale_factor)),
                                            reverse_chirp=flip_vertical)
         return self._mono(raw_map)
 
@@ -534,17 +580,34 @@ class DSPReconstructor:
     # ── Step 5: Quality ───────────────────────────────────────────────────────
 
     def evaluate_restoration_quality(self, original, restored):
-        # Evaluate over the full image (rotation tags only, no chirp strips).
-        # Crop to the smaller of the two heights if they differ.
-        min_h = min(original.shape[0], restored.shape[0])
-        o_crop = original[:min_h, :]
-        r_crop = restored[:min_h, :]
+        """Compute MSE, MAE, and PSNR between *original* and *restored*.
 
-        diff = np.abs(o_crop.astype(float) - r_crop.astype(float))
-        mse  = np.mean(diff ** 2)
-        psnr = 10 * math.log10(255 ** 2 / mse) if mse > 0 else 99.0
-        mae  = float(diff.mean())
-        m    = {'psnr': round(psnr, 2), 'mae': round(mae, 3)}
+        Standard definitions:
+          MSE  = mean((a - b)^2)
+          MAE  = mean(|a - b|)
+          PSNR = 10 * log10(MAX^2 / MSE),  +inf when MSE == 0
+        where MAX is the dynamic range of the image dtype (255 for uint8,
+        65535 for uint16, 1.0 for floats).
+
+        Inputs may differ in shape; both are cropped to their common region
+        on each axis before comparison.
+        """
+        h = min(original.shape[0], restored.shape[0])
+        w = min(original.shape[1], restored.shape[1])
+        o_crop = original[:h, :w]
+        r_crop = restored[:h, :w]
+
+        if np.issubdtype(o_crop.dtype, np.integer):
+            max_val = float(np.iinfo(o_crop.dtype).max)
+        else:
+            max_val = 1.0
+
+        diff = o_crop.astype(np.float64) - r_crop.astype(np.float64)
+        mse  = float(np.mean(diff ** 2))
+        mae  = float(np.mean(np.abs(diff)))
+        psnr = float(10.0 * math.log10(max_val ** 2 / mse)) if mse > 0.0 else float('inf')
+
+        m = {'psnr': round(psnr, 2), 'mae': round(mae, 3), 'mse': round(mse, 3)}
         with open(REPORT, 'w') as f:
-            f.write(f"PSNR: {m['psnr']} dB\nMAE: {m['mae']}\n")
+            f.write(f"PSNR: {psnr:.2f} dB\nMAE: {mae:.4f}\nMSE: {mse:.4f}\n")
         return m

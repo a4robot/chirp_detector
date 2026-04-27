@@ -48,10 +48,11 @@ TOTAL FOOTPRINT
 
 from __future__ import annotations
 
+import math
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -193,44 +194,304 @@ def synthesize_rotation_tag(image: np.ndarray,
 
 # ── Rotation decoder ──────────────────────────────────────────────────────────
 
-def decode_rotation_angle(image: np.ndarray,
-                           layout: RotationTagLayout,
-                           verbose: bool = False) -> Tuple[float, np.ndarray, float]:
-    """
-    Find the best-matching pre-rotated strip in *layout*.
-    Since the physical image was rotated, the ribbon that matches the physical
-    rotation will now be perfectly vertical at its designated bounds [col_start : col_end].
-    Therefore, a strict straight vertical column read will perfectly sample it!
-    """
-    H = image.shape[0]
-    best_angle = 0.0
-    best_score = -1.0 # We want MAX variance now
-    best_signal = None
+@dataclass
+class _LineSlopeEstimate:
+    """One line's contribution to a slope-consensus angle decode."""
+    label:          str     # short identifier (e.g. "x_tracker", "tag@+0.50")
+    design_angle:   float   # known intrinsic angle of the line in degrees
+    measured_angle: float   # design_angle + atan(-slope_image), in degrees
+    fit_residual:   float   # RMS of linear-fit residuals (px)
+    n_rows:         int     # rows that participated in the fit
 
-    for col_start, col_end, angle_deg in layout.strips:
+
+class RotationAngleDecoder:
+    """Decodes the physical rotation angle from the rotation-tag ladder.
+
+    Multiple decoding strategies share a common dispatch interface:
+
+        decoder = RotationAngleDecoder(layout, x_tracker_col=...)
+        angle, signal, score = decoder.decode(image, method='variance')
+        # or:
+        angle, signal, score = decoder.decode(image, method='slope_consensus')
+
+    Strategies
+    ----------
+    variance         Discrete winner-take-all on the column variance over
+                     each strip's mid-band. Resolution is capped at the
+                     ladder step (0.1°). Cheap and robust at small tilts.
+
+    slope_consensus  Coarse-decodes via variance, then refines by fitting
+                     a least-squares slope to the trajectory of the
+                     winning rotation-tag strip and to the X-Tracker
+                     line (when its column is registered). Each line is
+                     converted to an independent angle estimate via
+                     ``θ_phys = design_angle + atan(-slope)``; estimates
+                     are combined with a weighted median. Returns an
+                     angle snapped to the ladder for downstream
+                     compatibility; the un-snapped sub-step value is
+                     cached on ``self.last_fine_angle`` for callers that
+                     want continuous (sub-0.1°) precision.
+
+    Parameters
+    ----------
+    layout         RotationTagLayout from build_layout(...).
+    x_tracker_col  Image-column of the long vertical X-Tracker line
+                   (after any global tag-alignment shift). Required for
+                   slope_consensus to add an independent measurement;
+                   variance ignores it.
+    """
+
+    def __init__(self,
+                 layout: 'RotationTagLayout',
+                 x_tracker_col: Optional[float] = None):
+        self.layout = layout
+        self.x_tracker_col = x_tracker_col
+        # Populated by slope_consensus on each call:
+        self.last_fine_angle:  Optional[float] = None
+        self.last_spread_deg:  Optional[float] = None
+        self.last_estimates:   List[_LineSlopeEstimate] = []
+
+    # ── Public dispatch ───────────────────────────────────────────────
+
+    def decode(self,
+               image:   np.ndarray,
+               method:  str  = 'variance',
+               verbose: bool = False
+               ) -> Tuple[float, np.ndarray, float]:
+        if method == 'variance':
+            return self.variance(image, verbose=verbose)
+        if method == 'slope_consensus':
+            return self.slope_consensus(image, verbose=verbose)
+        raise ValueError(
+            f"unknown rotation decode method '{method}'. "
+            f"available: variance, slope_consensus"
+        )
+
+    # ── Strategy: variance (winner-take-all) ──────────────────────────
+
+    def variance(self,
+                 image:   np.ndarray,
+                 verbose: bool = False
+                 ) -> Tuple[float, np.ndarray, float]:
+        """Pick the strip whose mid-band column variance is highest."""
         H_img = image.shape[0]
-        y_center = H_img // 2
+        y_center     = H_img // 2
         safe_y_start = max(0, y_center - 2000)
         safe_y_end   = min(H_img, y_center + 2000)
-        c_start = max(0, col_start - 10)
-        c_end   = min(image.shape[1], col_end + 10)
-        
-        strip_crop_mid = image[safe_y_start:safe_y_end, c_start:c_end]
-        col_vars = np.var(strip_crop_mid, axis=0)
-        score = float(np.max(col_vars))
+
+        best_angle  = 0.0
+        best_score  = -1.0
+        best_signal = None
+
+        for col_start, col_end, angle_deg in self.layout.strips:
+            c_start = max(0, col_start - 10)
+            c_end   = min(image.shape[1], col_end + 10)
+
+            strip_crop_mid = image[safe_y_start:safe_y_end, c_start:c_end]
+            col_vars = np.var(strip_crop_mid, axis=0)
+            score = float(np.max(col_vars))
+
+            if verbose:
+                print(f"  angle={angle_deg:+6.2f}°  var={score:.3f}")
+
+            if score > best_score:
+                best_score  = score
+                best_angle  = angle_deg
+                best_pixel_idx = int(np.argmax(col_vars))
+                best_col = c_start + best_pixel_idx
+                best_signal = image[:, best_col]
+
+        return best_angle, best_signal, best_score
+
+    # ── Strategy: slope consensus ─────────────────────────────────────
+
+    def slope_consensus(self,
+                        image:   np.ndarray,
+                        verbose: bool = False
+                        ) -> Tuple[float, np.ndarray, float]:
+        """Variance-decode for a coarse θ_phys, then refine via slope
+        fits on the winning tag strip and the X-Tracker line.
+
+        Returns the snapped (ladder-step) angle and best_signal so the
+        downstream extraction loop in DSPReconstructor can match a
+        strip identity. The continuous fine angle is exposed via
+        ``self.last_fine_angle`` for sub-step drift compensation.
+        """
+        coarse_angle, coarse_signal, coarse_score = self.variance(image, verbose=False)
+
+        estimates: List[_LineSlopeEstimate] = []
+
+        # Fit slope of the variance-winning strip.
+        for col_start, col_end, angle_deg in self.layout.strips:
+            if abs(angle_deg - coarse_angle) < 1e-4:
+                est = self._fit_strip_slope(
+                    image,
+                    col_start=col_start,
+                    col_end=col_end,
+                    design_angle=angle_deg,
+                    coarse_phys=coarse_angle,
+                    label=f"tag@{angle_deg:+.2f}",
+                )
+                if est is not None:
+                    estimates.append(est)
+                break
+
+        # Fit slope of the X-Tracker line (independent geometric reference).
+        if self.x_tracker_col is not None:
+            xt_half = 25
+            est = self._fit_strip_slope(
+                image,
+                col_start=int(self.x_tracker_col - xt_half),
+                col_end=int(self.x_tracker_col + xt_half),
+                design_angle=0.0,
+                coarse_phys=coarse_angle,
+                label="x_tracker",
+            )
+            if est is not None:
+                estimates.append(est)
+
+        self.last_estimates = estimates
+
+        # No valid line slopes — fall back to the variance result.
+        if not estimates:
+            self.last_fine_angle = float(coarse_angle)
+            self.last_spread_deg = 0.0
+            if verbose:
+                print(f"  [slope-consensus] no usable line fits — falling back to "
+                      f"variance angle={coarse_angle:+.2f}°")
+            return coarse_angle, coarse_signal, coarse_score
+
+        angles  = np.array([e.measured_angle for e in estimates])
+        weights = np.array([e.n_rows / (e.fit_residual + 1.0) for e in estimates])
+        fine    = self._weighted_median(angles, weights)
+        spread  = float(np.std(angles)) if len(angles) > 1 else 0.0
+
+        self.last_fine_angle = float(fine)
+        self.last_spread_deg = spread
+
+        # Snap the fine angle to the closest ladder step so downstream
+        # strip-by-angle lookups remain valid.
+        ladder  = np.array([s[2] for s in self.layout.strips])
+        snapped = float(ladder[np.argmin(np.abs(ladder - fine))])
+
+        # Provide best_signal at the snapped strip's centre column.
+        best_signal = coarse_signal
+        for col_start, col_end, angle_deg in self.layout.strips:
+            if abs(angle_deg - snapped) < 1e-4:
+                best_col = (col_start + col_end) // 2
+                best_signal = image[:, best_col]
+                break
 
         if verbose:
-            print(f"  angle={angle_deg:+6.2f}°  var={score:.3f}")
-        
-        if score > best_score:
-            best_score  = score
-            best_angle  = angle_deg
-            
-            best_pixel_idx = int(np.argmax(col_vars))
-            best_col = c_start + best_pixel_idx
-            best_signal = image[:, best_col]
+            print(f"  [slope-consensus] coarse={coarse_angle:+.2f}°  "
+                  f"fine={fine:+.3f}° (snap={snapped:+.2f}°)  "
+                  f"spread={spread:.3f}°  n_lines={len(estimates)}")
+            for e in estimates:
+                print(f"    {e.label:14s}  design={e.design_angle:+5.2f}°  "
+                      f"measured={e.measured_angle:+.3f}°  "
+                      f"rows={e.n_rows}  resid={e.fit_residual:.2f} px")
 
-    return best_angle, best_signal, best_score
+        # Score: tighter agreement → higher score (1/std).
+        score = 1.0 / (spread + 1e-6)
+        return snapped, best_signal, score
+
+    # ── Internals ─────────────────────────────────────────────────────
+
+    def _fit_strip_slope(self,
+                         image:        np.ndarray,
+                         col_start:    int,
+                         col_end:      int,
+                         design_angle: float,
+                         coarse_phys:  float,
+                         label:        str,
+                         ) -> Optional[_LineSlopeEstimate]:
+        """Track a strip's per-row column position and fit a line slope.
+
+        The trajectory is predicted from ``coarse_phys − design_angle``
+        and a tight ±half_w window is searched around each predicted
+        column for the row's brightest pixel. Rows below a brightness
+        floor are dropped — this naturally excludes chirp-OFF rows on
+        rotation-tag strips and image padding rows where the line is
+        not drawn.
+        """
+        H, W = image.shape
+        cy = H / 2.0
+        slope_pred = -math.tan(math.radians(coarse_phys - design_angle))
+        col_centre = (col_start + col_end) / 2.0
+        half_w     = (col_end - col_start) / 2.0 + 5
+
+        rows: List[float] = []
+        cols: List[float] = []
+
+        # Stay clear of the 200-px painted-strip padding at top/bottom.
+        for r in range(200, H - 200):
+            cx = col_centre + (r - cy) * slope_pred
+            cs = max(0, int(round(cx - half_w)))
+            ce = min(W, int(round(cx + half_w)))
+            if ce - cs < 3:
+                continue
+
+            row_slice = image[r, cs:ce].astype(np.float32)
+            peak = int(np.argmax(row_slice))
+            # Require a clearly bright pixel — discards chirp-OFF rows
+            # (whose strip is dark or matches background) and any row
+            # without a usable line.
+            if row_slice[peak] < 200.0:
+                continue
+
+            # Sub-pixel parabolic refinement on the brightness peak.
+            peak_sub = float(peak)
+            if 0 < peak < len(row_slice) - 1:
+                a = float(row_slice[peak - 1])
+                b = float(row_slice[peak])
+                c = float(row_slice[peak + 1])
+                denom = (a - 2.0 * b + c)
+                if denom != 0.0:
+                    peak_sub = peak + 0.5 * (a - c) / denom
+
+            rows.append(float(r))
+            cols.append(float(cs) + peak_sub)
+
+        if len(rows) < 100:
+            return None
+
+        rows_a = np.asarray(rows, dtype=np.float64)
+        cols_a = np.asarray(cols, dtype=np.float64)
+        m, c0  = np.polyfit(rows_a, cols_a, 1)
+        residual = float(np.sqrt(np.mean((cols_a - (m * rows_a + c0)) ** 2)))
+        slope_angle_deg = math.degrees(math.atan(-m))
+        measured = design_angle + slope_angle_deg
+
+        return _LineSlopeEstimate(
+            label=label,
+            design_angle=design_angle,
+            measured_angle=measured,
+            fit_residual=residual,
+            n_rows=len(rows),
+        )
+
+    @staticmethod
+    def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+        order = np.argsort(values)
+        v = values[order]
+        w = weights[order]
+        cw = np.cumsum(w)
+        if cw[-1] <= 0:
+            return float(np.mean(v))
+        half = cw[-1] / 2.0
+        idx = int(np.searchsorted(cw, half))
+        idx = min(idx, len(v) - 1)
+        return float(v[idx])
+
+
+def decode_rotation_angle(image:  np.ndarray,
+                          layout: RotationTagLayout,
+                          verbose: bool = False
+                          ) -> Tuple[float, np.ndarray, float]:
+    """Backward-compatible variance-decode. New callers should prefer
+    ``RotationAngleDecoder(layout, x_tracker_col=...).decode(image, method=...)``
+    so they can switch between strategies."""
+    return RotationAngleDecoder(layout).variance(image, verbose=verbose)
 
 
 

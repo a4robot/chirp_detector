@@ -2,6 +2,11 @@ import os
 from dataclasses import dataclass
 import numpy as np
 
+# Canonical design width in pixels (457/500 * 16384 = 14974.976).
+# All horizontal layout fields below are calibrated against this width;
+# scaling against this constant adapts the geometry to arbitrary scan widths.
+DESIGN_WIDTH_PX: int = 14975
+
 @dataclass
 class ScanConfig:
     """
@@ -9,7 +14,7 @@ class ScanConfig:
     Dynamically generates the layout based on strip quantity and dimensions.
     """
     height: int = 20000
-    width:  int = 14975  # 457/500 * 16384 = 14974.976
+    width:  int = DESIGN_WIDTH_PX
 
     # ── Right X-Tracker (Horizontal Vibration Tracker) ───────────────────────
     # Shifted left by 1409 px from 16384 baseline
@@ -52,35 +57,30 @@ class ScanConfig:
                 
             self.strips.append((current_x, current_x + self.strip_width, mode, phase, f1_strip))
             current_x += self.strip_width + self.gap_width
-            
-        # Target calibration image size is set for 457mm target width
-        self.width = 14975
 
     def scale(self, factor: float) -> "ScanConfig":
         """
-        Returns a new ScanConfig instance with all horizontal/vertical pixel parameters 
+        Returns a new ScanConfig instance with all horizontal/vertical pixel parameters
         scaled by the given factor.
         """
         from copy import deepcopy
         scaled = deepcopy(self)
         scaled.width = int(round(self.width * factor))
         scaled.height = int(round(self.height * factor))
-        
+
         scaled.col1_start = int(round(self.col1_start * factor))
         scaled.col1_end = int(round(self.col1_end * factor))
         scaled.x_line_start = int(round(self.x_line_start * factor))
         scaled.x_line_end = int(round(self.x_line_end * factor))
         scaled.x_tracker_expected_center = self.x_tracker_expected_center * factor
-        
+
         scaled.strip_width = int(round(self.strip_width * factor))
         scaled.gap_width = int(round(self.gap_width * factor))
         scaled.first_gap = int(round(self.first_gap * factor))
-        
+
         # Re-run post_init to regenerate the staggered strips with scaled widths/gaps
         scaled.__post_init__()
-        # Override the width to the scaled width since post_init hardcodes it
-        scaled.width = int(round(self.width * factor))
-        
+
         return scaled
 
 # ─────────────────────────────────────────────────────────────────────────────
